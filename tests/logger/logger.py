@@ -9,7 +9,7 @@ class CsvLogger:
             self.w.writerow(header)
         self.t0 = int(time.time() * 1000)
 
-    def ts(self):
+    def ts(self):  # milliseconds since start
         return int(time.time() * 1000) - self.t0
 
     def write(self, *row):
