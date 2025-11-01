@@ -1,0 +1,140 @@
+// === 模拟输入引脚 ===
+#define L A0
+#define M A1
+#define R A2
+
+// === 电机驱动引脚 ===
+#define M1_PWM 2
+#define M1_DIR 3
+#define M2_PWM 4
+#define M2_DIR 5
+#define M3_PWM 6
+#define M3_DIR 7
+#define M4_PWM 8
+#define M4_DIR 9
+
+// === 参数设置 ===
+int TH_L = 900;     // 左探头黑白阈值
+int TH_M = 900;     // 中探头黑白阈值
+int TH_R = 900;     // 右探头黑白阈值
+int BASE_SPEED = 80;    // 前进速度（慢速）
+int TURN_SPEED = 70;    // 转向速度
+int BACK_TIME = 150;    // 碰线后后退时间 (ms)
+int TURN_TIME = 400;    // 转向时间 (ms)
+
+// === 初始化 ===
+void setup() {
+  Serial.begin(115200);
+  Serial.println("=== Analog Black-Line Avoidance Car ===");
+
+  pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
+  pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
+  pinMode(M3_PWM, OUTPUT); pinMode(M3_DIR, OUTPUT);
+  pinMode(M4_PWM, OUTPUT); pinMode(M4_DIR, OUTPUT);
+
+  stopMotors();
+  delay(500);
+  Serial.println("Ready!");
+}
+
+// === 主循环 ===
+void loop() {
+  int Lval = analogRead(L);
+  int Mval = analogRead(M);
+  int Rval = analogRead(R);
+
+  bool L_black = (Lval > TH_L);
+  bool M_black = (Mval > TH_M);
+  bool R_black = (Rval > TH_R);
+
+  Serial.print("L="); Serial.print(Lval);
+  Serial.print(" M="); Serial.print(Mval);
+  Serial.print(" R="); Serial.print(Rval);
+  Serial.print("  ->  ");
+  if (L_black || M_black || R_black) Serial.println("🖤 BLACK DETECTED");
+  else Serial.println("⬜ WHITE FLOOR");
+
+  // 白地：正常前进
+  if (!L_black && !M_black && !R_black) {
+    forward(BASE_SPEED);
+  }
+  // 检测到黑线：后退 + 转向
+  else {
+    stopMotors(); delay(100);
+    backward(BASE_SPEED); delay(BACK_TIME);
+    stopMotors(); delay(100);
+
+    if (L_black && !R_black) {
+      // 左边撞线 → 向右转
+      turnRight(TURN_SPEED);
+      delay(TURN_TIME);
+    } 
+    else if (R_black && !L_black) {
+      // 右边撞线 → 向左转
+      turnLeft(TURN_SPEED);
+      delay(TURN_TIME);
+    } 
+    else {
+      // 中间或两边一起黑 → 默认右转
+      turnRight(TURN_SPEED);
+      delay(TURN_TIME);
+    }
+    stopMotors(); delay(100);
+  }
+
+  delay(20);
+}
+
+// === 电机控制函数 ===
+void forward(int s) {
+  digitalWrite(M1_DIR, LOW);
+  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, HIGH);
+  digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+
+void backward(int s) {
+  digitalWrite(M1_DIR, HIGH);
+  digitalWrite(M3_DIR, HIGH);
+  digitalWrite(M2_DIR, LOW);
+  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+
+void turnLeft(int s) {
+  // 左轮后、右轮前 → 左转
+  digitalWrite(M1_DIR, HIGH);
+  digitalWrite(M3_DIR, HIGH);
+  digitalWrite(M2_DIR, HIGH);
+  digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+
+void turnRight(int s) {
+  // 左轮前、右轮后 → 右转
+  digitalWrite(M1_DIR, LOW);
+  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, LOW);
+  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+
+void stopMotors() {
+  analogWrite(M1_PWM, 0);
+  analogWrite(M2_PWM, 0);
+  analogWrite(M3_PWM, 0);
+  analogWrite(M4_PWM, 0);
+}
