@@ -1,0 +1,181 @@
+// === Line sensors ===
+#define L A0
+#define M A1
+#define R A2
+
+// === Ultrasonic (TRIG/ECHO) ===
+#define US_TRIG 24
+#define US_ECHO 25
+#define TIMEOUT_US 30000UL  // 30 ms ≈ 5 m
+
+// === Motor pins ===
+#define M1_PWM 2
+#define M1_DIR 3
+#define M2_PWM 4
+#define M2_DIR 5
+#define M3_PWM 6
+#define M3_DIR 7
+#define M4_PWM 8
+#define M4_DIR 9
+
+// === Parameters ===
+int   TH_L = 900, TH_M = 900, TH_R = 900; // 黑白阈值
+float OBSTACLE_NEAR_CM = 15.0f;           // 避障阈值
+int   BASE_SPEED   = 180;
+int   BACK_SPEED   = 160;
+int   TURN_SPEED   = 160;
+int   BACK_TIME_MS = 250;
+int   TURN_TIME_MS = 700;
+int   AVOID_DELAY  = 150;
+
+// === States ===
+enum State { RUN_FORWARD, EDGE_BACK, EDGE_TURN, AVOID_OBSTACLE };
+State state = RUN_FORWARD;
+
+// === Globals ===
+float us_dist_cm = 10000.0f;
+unsigned long stateStart = 0;
+
+// === === Functions === ===
+
+// ---- Ultrasonic distance ----
+float readUS_CM() {
+  digitalWrite(US_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(US_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(US_TRIG, LOW);
+  unsigned long dur = pulseIn(US_ECHO, HIGH, TIMEOUT_US);
+  if (dur == 0) return 10000.0f;
+  return dur * 0.0343f * 0.5f;
+}
+
+// ---- Motor helpers ----
+void forward(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, LOW);  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, HIGH); digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s); analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s); analogWrite(M4_PWM, s);
+}
+
+void backward(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, HIGH); digitalWrite(M3_DIR, HIGH);
+  digitalWrite(M2_DIR, LOW);  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s); analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s); analogWrite(M4_PWM, s);
+}
+
+void turnRight(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, LOW);  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, LOW);  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s); analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s); analogWrite(M4_PWM, s);
+}
+
+void turnLeft(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, HIGH); digitalWrite(M3_DIR, HIGH);
+  digitalWrite(M2_DIR, HIGH); digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s); analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s); analogWrite(M4_PWM, s);
+}
+
+void stopMotors() {
+  analogWrite(M1_PWM, 0); analogWrite(M3_PWM, 0);
+  analogWrite(M2_PWM, 0); analogWrite(M4_PWM, 0);
+}
+
+// === Setup ===
+void setup() {
+  Serial.begin(115200);
+  Serial.println("=== Line follower + Ultrasonic avoidance ===");
+
+  pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
+  pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
+  pinMode(M3_PWM, OUTPUT); pinMode(M3_DIR, OUTPUT);
+  pinMode(M4_PWM, OUTPUT); pinMode(M4_DIR, OUTPUT);
+
+  pinMode(US_TRIG, OUTPUT);
+  pinMode(US_ECHO, INPUT);
+
+  stopMotors();
+  delay(300);
+  Serial.println("Ready!");
+}
+
+// === Loop ===
+void loop() {
+  // --- 更新超声波 ---
+  us_dist_cm = readUS_CM();
+
+  // --- 更新线传感器 ---
+  int Lval = analogRead(L);
+  int Mval = analogRead(M);
+  int Rval = analogRead(R);
+  bool L_black = (Lval > TH_L);
+  bool M_black = (Mval > TH_M);
+  bool R_black = (Rval > TH_R);
+
+  // --- 状态机 ---
+  switch (state) {
+    case RUN_FORWARD:
+      // 1️⃣ 避障优先
+      if (us_dist_cm <= OBSTACLE_NEAR_CM) {
+        stopMotors(); delay(50);
+        state = AVOID_OBSTACLE;
+        stateStart = millis();
+        Serial.println("→ AVOID_OBSTACLE");
+        break;
+      }
+
+      // 2️⃣ 黑线检测
+      if (L_black || M_black || R_black) {
+        stopMotors(); delay(50);
+        state = EDGE_BACK;
+        stateStart = millis();
+        Serial.println("→ EDGE_BACK");
+        break;
+      }
+
+      // 3️⃣ 默认前进
+      forward(BASE_SPEED);
+      break;
+
+    case AVOID_OBSTACLE:
+      turnRight(TURN_SPEED);
+      if (millis() - stateStart >= (unsigned long)TURN_TIME_MS) {
+        stopMotors(); delay(AVOID_DELAY);
+        state = RUN_FORWARD;
+        Serial.println("AVOID done → RUN_FORWARD");
+      }
+      break;
+
+    case EDGE_BACK:
+      backward(BACK_SPEED);
+      if (millis() - stateStart >= (unsigned long)BACK_TIME_MS) {
+        stopMotors(); delay(100);
+        state = EDGE_TURN;
+        stateStart = millis();
+        Serial.println("→ EDGE_TURN");
+      }
+      break;
+
+    case EDGE_TURN:
+      // 根据左右黑线决定方向
+      if (L_black && !R_black) turnRight(TURN_SPEED);
+      else if (R_black && !L_black) turnLeft(TURN_SPEED);
+      else turnRight(TURN_SPEED); // 默认右转
+
+      if (millis() - stateStart >= (unsigned long)TURN_TIME_MS) {
+        stopMotors(); delay(AVOID_DELAY);
+        state = RUN_FORWARD;
+        Serial.println("EDGE_TURN done → RUN_FORWARD");
+      }
+      break;
+  }
+
+  delay(20);
+}
