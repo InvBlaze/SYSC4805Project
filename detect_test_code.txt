@@ -1,0 +1,112 @@
+// === Ultrasonic pins ===
+#define US_TRIG 24
+#define US_ECHO 25
+#define TIMEOUT_US 30000UL  // 30ms ≈ 5m
+
+// === Motor pins ===
+#define M1_PWM 2
+#define M1_DIR 3
+#define M2_PWM 4
+#define M2_DIR 5
+#define M3_PWM 6
+#define M3_DIR 7
+#define M4_PWM 8
+#define M4_DIR 9
+
+// === Parameters ===
+float OBSTACLE_NEAR_CM = 15.0f;   // 阈值：15cm 内认为有障碍
+int   TURN_TIME_MS     = 800;     // 原地转弯时长
+int   BASE_SPEED       = 180;     // 正常前进速度
+int   TURN_SPEED       = 160;     // 转弯速度
+
+// === Function: Read distance ===
+float readUS_CM() {
+  digitalWrite(US_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(US_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(US_TRIG, LOW);
+
+  unsigned long dur = pulseIn(US_ECHO, HIGH, TIMEOUT_US);
+  if (dur == 0) return 10000.0f;
+  return dur * 0.0343f * 0.5f;  // cm
+}
+
+// === Setup ===
+void setup() {
+  Serial.begin(115200);
+  Serial.println("=== Ultrasonic Obstacle Avoidance ===");
+
+  // 电机初始化
+  pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
+  pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
+  pinMode(M3_PWM, OUTPUT); pinMode(M3_DIR, OUTPUT);
+  pinMode(M4_PWM, OUTPUT); pinMode(M4_DIR, OUTPUT);
+
+  // 超声波初始化
+  pinMode(US_TRIG, OUTPUT);
+  pinMode(US_ECHO, INPUT);
+
+  stopMotors();
+  delay(300);
+  Serial.println("Ready!");
+}
+
+// === Loop ===
+void loop() {
+  float dist = readUS_CM();
+  Serial.print("Distance: ");
+  Serial.print(dist, 1);
+  Serial.println(" cm");
+
+  if (dist > 0 && dist <= OBSTACLE_NEAR_CM) {
+    // 检测到障碍 → 停止 + 原地右转
+    Serial.println("⚠️  Obstacle detected! Turning...");
+    stopMotors();
+    delay(100);
+
+    turnRight(TURN_SPEED);
+    delay(TURN_TIME_MS);
+
+    stopMotors();
+    delay(150);
+  } 
+  else {
+    forward(BASE_SPEED);
+  }
+
+  delay(100);  // 控制刷新频率
+}
+
+// === Motor helpers ===
+void forward(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, LOW);
+  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, HIGH);
+  digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+
+void turnRight(int s) {
+  s = constrain(s, 0, 255);
+  // 左轮前进，右轮后退 → 原地右转
+  digitalWrite(M1_DIR, LOW);
+  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, LOW);
+  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+
+void stopMotors() {
+  analogWrite(M1_PWM, 0);
+  analogWrite(M2_PWM, 0);
+  analogWrite(M3_PWM, 0);
+  analogWrite(M4_PWM, 0);
+}
