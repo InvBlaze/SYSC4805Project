@@ -1,0 +1,44 @@
+/* UT-MOT-01 — Motor basic checks (no encoders required)
+   Pass unconditionally after running forward/back safely.
+   Pins: M1_PWM=2 M1_DIR=3, M2_PWM=4 M2_DIR=5, M3_PWM=6 M3_DIR=7, M4_PWM=8 M4_DIR=9.
+   Tip: Lift wheels off the ground. */
+
+#define M1_PWM 2
+#define M1_DIR 3
+#define M2_PWM 4
+#define M2_DIR 5
+#define M3_PWM 6
+#define M3_DIR 7
+#define M4_PWM 8
+#define M4_DIR 9
+
+void forwardLR(int Lp,int Rp){
+  Lp=constrain(Lp,0,255); Rp=constrain(Rp,0,255);
+  digitalWrite(M1_DIR,LOW);  digitalWrite(M3_DIR,LOW);
+  digitalWrite(M2_DIR,HIGH); digitalWrite(M4_DIR,HIGH);
+  analogWrite(M1_PWM,Lp); analogWrite(M3_PWM,Lp);
+  analogWrite(M2_PWM,Rp); analogWrite(M4_PWM,Rp);
+}
+void backward(int s){
+  s=constrain(s,0,255);
+  digitalWrite(M1_DIR,HIGH); digitalWrite(M3_DIR,HIGH);
+  digitalWrite(M2_DIR,LOW);  digitalWrite(M4_DIR,LOW);
+  analogWrite(M1_PWM,s); analogWrite(M3_PWM,s);
+  analogWrite(M2_PWM,s); analogWrite(M4_PWM,s);
+}
+void stopMotors(){ analogWrite(M1_PWM,0); analogWrite(M3_PWM,0); analogWrite(M2_PWM,0); analogWrite(M4_PWM,0); }
+
+void setup(){
+  Serial.begin(115200);
+  pinMode(M1_PWM,OUTPUT); pinMode(M1_DIR,OUTPUT);
+  pinMode(M2_PWM,OUTPUT); pinMode(M2_DIR,OUTPUT);
+  pinMode(M3_PWM,OUTPUT); pinMode(M3_DIR,OUTPUT);
+  pinMode(M4_PWM,OUTPUT); pinMode(M4_DIR,OUTPUT);
+  Serial.println("===== UT-MOT-01 =====");
+  Serial.println("Forward 1.2s @ PWM 120, then backward 1.2s @ PWM 120.");
+  forwardLR(120,120); delay(1200);
+  backward(120);      delay(1200);
+  stopMotors();
+  Serial.println("[SUMMARY] UT-MOT-01 -> PASS");
+}
+void loop(){ while(true) delay(250); }
