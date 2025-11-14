@@ -1,0 +1,38 @@
+// === Line sensors (front) ===
+#define L A0
+#define M A1
+#define R A2
+
+int TH_L = 900, TH_M = 900, TH_R = 900;
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("=== Line Sensor Debug Mode ===");
+}
+
+void loop() {
+  int Lval = analogRead(L);
+  int Mval = analogRead(M);
+  int Rval = analogRead(R);
+
+  bool L_black = (Lval > TH_L);
+  bool M_black = (Mval > TH_M);
+  bool R_black = (Rval > TH_R);
+
+  Serial.print("L=");
+  Serial.print(Lval);
+  Serial.print(L_black ? " [BLACK]" : " [WHITE]");
+
+  Serial.print("   M=");
+  Serial.print(Mval);
+  Serial.print(M_black ? " [BLACK]" : " [WHITE]");
+
+  Serial.print("   R=");
+  Serial.print(Rval);
+  Serial.print(R_black ? " [BLACK]" : " [WHITE]");
+
+  Serial.println();
+
+  delay(80);
+}
