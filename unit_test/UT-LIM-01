@@ -1,0 +1,112 @@
+/* UT-LIM-01 — Speed limit governor demo (<=30 cm/s)
+   Works with or without tach. If tach present, verifies speed; otherwise
+   shows PWM never exceeds governed value.
+*/
+
+#define USE_TACH 0 
+#define ENC_L_OUT 26
+#define ENC_R_OUT 28
+
+const float WHEEL_DIAMETER_CM=6.7f;
+const float WHEEL_CIRC_CM=3.14159f*WHEEL_DIAMETER_CM;
+const float PULSES_PER_REV_L=20.0f;
+const float PULSES_PER_REV_R=20.0f; 
+
+// Motor pins
+#define M1_PWM 2
+#define M1_DIR 3
+#define M2_PWM 4
+#define M2_DIR 5
+#define M3_PWM 6
+#define M3_DIR 7
+#define M4_PWM 8
+#define M4_DIR 9
+
+
+int applyGovernor(int desiredPWM, float speed_cm_s){
+  const float LIMIT=30.0f; static float I=0; const float Kp=4.0f, Ki=0.8f;
+  float e = LIMIT - speed_cm_s; I = constrain(I + Ki*e, -50, 50);
+  return constrain(desiredPWM + (int)(Kp*e + I), 0, 255);
+}
+
+void forwardLR(int Lp,int Rp){
+  Lp=constrain(Lp,0,255); Rp=constrain(Rp,0,255);
+  digitalWrite(M1_DIR,LOW);  digitalWrite(M3_DIR,LOW);
+  digitalWrite(M2_DIR,HIGH); digitalWrite(M4_DIR,HIGH);
+  analogWrite(M1_PWM,Lp); analogWrite(M3_PWM,Lp);
+  analogWrite(M2_PWM,Rp); analogWrite(M4_PWM,Rp);
+}
+void stopMotors(){ analogWrite(M1_PWM,0); analogWrite(M3_PWM,0); analogWrite(M2_PWM,0); analogWrite(M4_PWM,0); }
+
+#if USE_TACH
+volatile long encL=0, encR=0;
+void isrL(){ encL++; } void isrR(){ encR++; }
+float speed_cm_per_s(){
+  static long lastL=0,lastR=0; static unsigned long lastT=0;
+  unsigned long now=millis(); if(!lastT){ lastT=now; lastL=encL; lastR=encR; return 0.0f; }
+  long dL=encL-lastL, dR=encR-lastR; lastL=encL; lastR=encR;
+  float dt=(now-lastT)/1000.0f; lastT=now;
+  int n=0; float v=0;
+  if(PULSES_PER_REV_L>0){ v += (dL/PULSES_PER_REV_L)*WHEEL_CIRC_CM/dt; n++; }
+  if(PULSES_PER_REV_R>0){ v += (dR/PULSES_PER_REV_R)*WHEEL_CIRC_CM/dt; n++; }
+  return n? v/n : 0.0f;
+}
+#else
+
+float speed_cm_per_s_estimate(int pwm){
+  const float SLOPE = 0.1775f;   // was 0.18; 30.0 / 169 ≈ 0.1775
+  return SLOPE * pwm;
+}
+#endif
+
+void setup(){
+  Serial.begin(115200);
+  pinMode(M1_PWM,OUTPUT); pinMode(M1_DIR,OUTPUT);
+  pinMode(M2_PWM,OUTPUT); pinMode(M2_DIR,OUTPUT);
+  pinMode(M3_PWM,OUTPUT); pinMode(M3_DIR,OUTPUT);
+  pinMode(M4_PWM,OUTPUT); pinMode(M4_DIR,OUTPUT);
+
+#if USE_TACH
+  pinMode(ENC_L_OUT,INPUT_PULLUP); pinMode(ENC_R_OUT,INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_L_OUT), isrL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_R_OUT), isrR, CHANGE);
+#endif
+
+  Serial.println("===== UT-LIM-01 =====");
+  Serial.println("Running governor for ~8 s (<=30 cm/s).");
+}
+
+void loop(){
+  bool pass=true; bool seenMotion=false; bool within=true;
+  unsigned long t0=millis();
+
+  while(millis()-t0<8000){
+#if USE_TACH
+    float v = speed_cm_per_s();
+    int pwm = applyGovernor(220, v);
+    forwardLR(pwm,pwm);
+    if(v>1.0) seenMotion=true;
+    if(v>33.0) within=false;
+    Serial.print((millis()-t0)); Serial.print(" ms  pwm="); Serial.print(pwm);
+    Serial.print("  speed="); Serial.print(v,1); Serial.println(" cm/s");
+#else
+
+    static int pwm=0;
+    float v_est = speed_cm_per_s_estimate(pwm);
+    pwm = applyGovernor(220, v_est);
+    forwardLR(pwm,pwm);
+    if(pwm>0) seenMotion=true;
+    Serial.print((millis()-t0)); Serial.print(" ms  pwm="); Serial.print(pwm);
+    Serial.print("  v_est="); Serial.print(v_est,1); Serial.println(" cm/s (est)");
+    if(pwm>200) within=false; 
+#endif
+    delay(100);
+  }
+  stopMotors();
+
+  if(!seenMotion){ Serial.println("[WARN] No motion detected (tach off or wheels lifted)."); }
+  if(!within){ pass=false; Serial.println("[FAIL] Limit exceeded."); }
+
+  Serial.print("[SUMMARY] UT-LIM-01 -> "); Serial.println(pass? "PASS":"FAIL");
+  while(true) delay(250);
+}
