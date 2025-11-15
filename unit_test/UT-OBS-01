@@ -1,86 +1,60 @@
-/* UT-OBS-01 — Ultrasonic near detection & classification
-   Pass if at least one sensor returns echoes; prints near flags and class.
-   Wiring: LOW TRIG=22 ECHO=23, HIGH TRIG=24 ECHO=25. */
+/* UT-OBS-01 — Ultrasonic accuracy & classification
+   Checks median distance at 5, 10, 20, 30 cm and average abs error <= 1.5 cm.
+   Also prints class: CLEAR / CUBE (low only) / TALL (high or both).
+   Pins: LOW TRIG=22 ECHO=23, HIGH TRIG=24 ECHO=25. */
 
 #define US_LOW_TRIG   22
 #define US_LOW_ECHO   23
 #define US_HIGH_TRIG  24
 #define US_HIGH_ECHO  25
 
-const unsigned long US_TO_US=24000, US_PERIOD_MS=60;
-const float US_ALPHA=0.45f;                  // low-pass
-const float LOW_NEAR_CM=10.0f, HIGH_NEAR_CM=20.0f;  // per your spec
-const uint8_t NEAR_CONFIRM_N=3, NEAR_DROP_N=2;
-
-#define ASSERT_OK(c,msg) do{ if(!(c)){ Serial.print("[FAIL] "); Serial.println(msg); ok=false; } }while(0)
-void hdr(const char* t){ Serial.println(); Serial.print("===== "); Serial.print(t); Serial.println(" ====="); }
-
-float low_cm=10000.0f, high_cm=10000.0f;
-unsigned long lastLow=0,lastHigh=0; bool pingLow=true;
-uint8_t cntLow=0,cntHigh=0; bool nearLow=false,nearHigh=false;
+const unsigned long US_TO_US=24000;
 
 static inline void pulseTrig(int pin){ digitalWrite(pin,LOW); delayMicroseconds(2); digitalWrite(pin,HIGH); delayMicroseconds(10); digitalWrite(pin,LOW); }
-static float readUS(int trig,int echo){
-  pulseTrig(trig); unsigned long d=pulseIn(echo,HIGH,US_TO_US);
-  return d? (d*0.0343f*0.5f): 10000.0f;
-}
-static inline float lp(float prev,float x){ return (1.0f-US_ALPHA)*prev + US_ALPHA*x; }
-static inline void upd(bool &flag,uint8_t &cnt,bool sample,bool up,uint8_t needUp,uint8_t needDown){
-  if(sample){ if(cnt<255)cnt++; if(cnt>=needUp) flag=true; }
-  else{ if(cnt>0)cnt--; if(cnt<=needDown) flag=false; }
+static float readUS(int t,int e){ pulseTrig(t); unsigned long d=pulseIn(e,HIGH,US_TO_US); return d? d*0.0343f*0.5f: 10000.0f; }
+
+float median25(float* a){
+  for(int i=0;i<25;i++) for(int j=i+1;j<25;j++) if(a[j]<a[i]){ float tmp=a[i]; a[i]=a[j]; a[j]=tmp; }
+  return a[12];
 }
 
 void setup(){
-  Serial.begin(115200); hdr("UT-OBS-01");
+  Serial.begin(115200);
   pinMode(US_LOW_TRIG,OUTPUT);  pinMode(US_LOW_ECHO,INPUT);
   pinMode(US_HIGH_TRIG,OUTPUT); pinMode(US_HIGH_ECHO,INPUT);
-  low_cm=readUS(US_LOW_TRIG,US_LOW_ECHO);
-  high_cm=readUS(US_HIGH_TRIG,US_HIGH_ECHO);
-  Serial.println("Show a book/target at ~10 cm (low) or 20 cm (high) to see near flags.");
+  Serial.println("===== UT-OBS-01 =====");
+  Serial.println("Use a flat target at 5, 10, 20, 30 cm (tape measure). Keep steady during each prompt.");
 }
 
 void loop(){
-  bool ok=true;
-  unsigned long now=millis();
-  if(pingLow){
-    if(now-lastLow>=US_PERIOD_MS){
-      float raw=readUS(US_LOW_TRIG,US_LOW_ECHO);
-      low_cm=lp(low_cm,raw); lastLow=now; pingLow=false;
-      bool sampleNear=(low_cm>0 && low_cm<=LOW_NEAR_CM);
-      upd(nearLow,cntLow,sampleNear,true,NEAR_CONFIRM_N,NEAR_DROP_N);
-    }
-  }else{
-    if(now-lastHigh>=US_PERIOD_MS){
-      float raw=readUS(US_HIGH_TRIG,US_HIGH_ECHO);
-      high_cm=lp(high_cm,raw); lastHigh=now; pingLow=true;
-      bool sampleNear=(high_cm>0 && high_cm<=HIGH_NEAR_CM);
-      upd(nearHigh,cntHigh,sampleNear,true,NEAR_CONFIRM_N,NEAR_DROP_N);
-    }
+  bool ok=true; float sumErr=0; int nPts=0;
+
+  int targets[4]={5,10,20,30};
+  for(int k=0;k<4;k++){
+    int cm = targets[k];
+    Serial.print("Hold target at ~"); Serial.print(cm); Serial.println(" cm and press ENTER.");
+    while(!Serial.available()){}
+    while(Serial.available()) Serial.read();
+    float L[25], H[25];
+    for(int i=0;i<25;i++){ L[i]=readUS(US_LOW_TRIG,US_LOW_ECHO); H[i]=readUS(US_HIGH_TRIG,US_HIGH_ECHO); delay(25); }
+    float low_m  = median25(L);
+    float high_m = median25(H);
+    float eL = (low_m<9000)? fabs(low_m - cm) : 999;
+    float eH = (high_m<9000)? fabs(high_m - cm): 999;
+    float e  = min(eL,eH);
+    if(e<900) { sumErr+=e; nPts++; }
+
+    const char* cls = (low_m<9000 && high_m>9000) ? "CUBE" :
+                      (high_m<9000)                ? "TALL" :
+                                                     "CLEAR";
+    Serial.print("low="); Serial.print(low_m,1); Serial.print(" cm, high="); Serial.print(high_m,1);
+    Serial.print(" cm, best error="); Serial.print(e,2); Serial.print(" cm, class="); Serial.println(cls);
   }
 
-  static unsigned long t0=0; if(millis()-t0>=150){
-    t0=millis();
-    Serial.print("low="); Serial.print(low_cm,1); Serial.print("cm ");
-    Serial.print("high="); Serial.print(high_cm,1); Serial.print("cm  ");
-    Serial.print("nearL="); Serial.print(nearLow); Serial.print(" nearH="); Serial.print(nearHigh);
-    const char* cls = (!nearLow && !nearHigh) ? "CLEAR" :
-                      ( nearLow && !nearHigh) ? "CUBE"  :
-                                               "TALL";
-    Serial.print("  class="); Serial.println(cls);
-  }
+  float avgErr = nPts? sumErr/nPts : 999;
+  Serial.print("Average abs error ≈ "); Serial.print(avgErr,2); Serial.println(" cm");
+  if(!(avgErr <= 1.5f)){ Serial.println("[FAIL] Average error > 1.5 cm"); ok=false; }
 
-  static bool first=true;
-  if(first){ first=false; delay(800);
-    bool anyEcho = (low_cm<9000.0f) || (high_cm<9000.0f);
-    ASSERT_OK(anyEcho, "No echo — check wiring/target distance");
-    Serial.print("[SUMMARY] UT-OBS-01 -> "); Serial.println(ok? "PASS":"FAIL");
-  }
-  if (Serial.available()) {                 // any key to stop
-  while(Serial.available()) Serial.read();
-  Serial.println("[SUMMARY] UT-OBS-01 -> PASS (manual stop)");
-  while(true){ delay(250); }
-}
-
-
-
+  Serial.print("[SUMMARY] UT-OBS-01 -> "); Serial.println(ok? "PASS":"FAIL");
+  while(true) delay(250);
 }
