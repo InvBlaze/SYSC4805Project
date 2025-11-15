@@ -1,43 +1,49 @@
 /* UT-LINE-01 — Line sensors (A0..A2)
-   Pass if we see readable input and reasonable white/black separation.
-   Wiring: L=A0, M=A1, R=A2 (3.3V logic), common GND. */
+   Verifies white/black separation and counts 20 tape crossings on channel M.
+   Wiring: L=A0, M=A1, R=A2. */
 
 #define L A0
 #define M A1
 #define R A2
-
 #define ASSERT_OK(c,msg) do{ if(!(c)){ Serial.print("[FAIL] "); Serial.println(msg); ok=false; } }while(0)
-void hdr(const char* t){ Serial.println(); Serial.print("===== "); Serial.print(t); Serial.println(" ====="); }
+
 void wait_enter(const char* msg){ Serial.println(msg); while(Serial.available()) Serial.read(); while(!Serial.available()){} while(Serial.available()) Serial.read(); }
 
 void setup(){
   Serial.begin(115200);
-  hdr("UT-LINE-01");
-  Serial.println("Place sensors on WHITE when asked, then on BLACK tape.");
+  Serial.println("===== UT-LINE-01 =====");
 }
 
 void loop(){
-  bool ok=true;
-  const int N = 150;
+  bool ok=true; const int N=120;
 
-  wait_enter("Put L/M/R over WHITE, press ENTER.");
-  long WL=0,WM=0,WR=0;
-  for(int i=0;i<N;i++){ WL+=analogRead(L); WM+=analogRead(M); WR+=analogRead(R); delay(2); }
-  int wL=WL/N, wM=WM/N, wR=WR/N;
+  // White/Black means
+  wait_enter("Place sensors on WHITE, press ENTER.");
+  long wL=0,wM=0,wR=0; for(int i=0;i<N;i++){ wL+=analogRead(L); wM+=analogRead(M); wR+=analogRead(R); delay(2); }
+  int WL=wL/N, WM=wM/N, WR=wR/N;
 
-  wait_enter("Now put L/M/R over BLACK tape, press ENTER.");
-  long BL=0,BM=0,BR=0;
-  for(int i=0;i<N;i++){ BL+=analogRead(L); BM+=analogRead(M); BR+=analogRead(R); delay(2); }
-  int bL=BL/N, bM=BM/N, bR=BR/N;
+  wait_enter("Place sensors on BLACK tape, press ENTER.");
+  long bL=0,bM=0,bR=0; for(int i=0;i<N;i++){ bL+=analogRead(L); bM+=analogRead(M); bR+=analogRead(R); delay(2); }
+  int BL=bL/N, BM=bM/N, BR=bR/N;
 
-  int dL=bL-wL, dM=bM-wM, dR=bR-wR;
+  int dL=BL-WL, dM=BM-WM, dR=BR-WR;
+  Serial.print("WHITE L/M/R = "); Serial.print(WL); Serial.print("/"); Serial.print(WM); Serial.print("/"); Serial.println(WR);
+  Serial.print("BLACK L/M/R = "); Serial.print(BL); Serial.print("/"); Serial.print(BM); Serial.print("/"); Serial.println(BR);
+  Serial.print("SEPARATION   = "); Serial.print(dL); Serial.print("/"); Serial.print(dM); Serial.print("/"); Serial.println(dR);
+  ASSERT_OK(dL>120 && dM>120 && dR>120, "Separation < 120 counts");
 
-  Serial.print("WHITE means L/M/R = "); Serial.print(wL); Serial.print("/"); Serial.print(wM); Serial.print("/"); Serial.println(wR);
-  Serial.print("BLACK means L/M/R = "); Serial.print(bL); Serial.print("/"); Serial.print(bM); Serial.print("/"); Serial.println(bR);
-  Serial.print("Separation  L/M/R = "); Serial.print(dL); Serial.print("/"); Serial.print(dM); Serial.print("/"); Serial.println(dR);
-
-  ASSERT_OK((wL>0||wM>0||wR>0), "All ADC zeros — check power/wiring");
-  ASSERT_OK(dL>120, "L separation <120"); ASSERT_OK(dM>120, "M separation <120"); ASSERT_OK(dR>120, "R separation <120");
+  // 20 crossings on M @ various angles (manual sweep)
+  Serial.println("Now cross the tape on channel M ~20 times (any angles).");
+  int TH_M = (WM+BM)/2; int crossings=0; bool onBlack=false;
+  unsigned long t0=millis();
+  while(crossings<20 && millis()-t0<60000){
+    int v=analogRead(M);
+    bool black = v > TH_M;
+    if(black && !onBlack){ crossings++; onBlack=true; Serial.print("Crossings="); Serial.println(crossings); }
+    if(!black && onBlack){ onBlack=false; }
+    delay(10);
+  }
+  ASSERT_OK(crossings>=20, "Fewer than 20 crossings detected");
 
   Serial.print("[SUMMARY] UT-LINE-01 -> "); Serial.println(ok? "PASS":"FAIL");
   while(true) delay(250);
