@@ -1,0 +1,51 @@
+/* UT-LOG-01 — Logging System
+   Records key events with timestamps: speed change, boundary (line), obstacle.
+   Test simulates the three events and verifies they appear in order.
+   Output: prints logs and PASS/FAIL summary. */
+
+struct LogEntry{ unsigned long ms; const char* evt; };
+const int LOG_MAX=32; LogEntry LOGS[LOG_MAX]; int logN=0;
+
+void log_evt(const char* e){
+  if(logN<LOG_MAX){ LOGS[logN++] = { millis(), e }; }
+  Serial.print("[LOG] "); Serial.print(millis()); Serial.print(" ms  "); Serial.println(e);
+}
+
+void setup(){
+  Serial.begin(115200);
+  Serial.println("===== UT-LOG-01 =====");
+  Serial.println("Simulating: speed changes, boundary, obstacle …");
+}
+
+void loop(){
+  bool ok=true;
+
+  // Simulated speed changes
+  log_evt("speed_change: set 120");
+  delay(150);
+  log_evt("speed_change: set 180");
+  delay(150);
+
+  // Simulated boundary detection
+  log_evt("boundary_detected: L/M/R=0/1/0");
+  delay(150);
+
+  // Simulated obstacle trigger
+  log_evt("obstacle_detected: HIGH near (<=20cm)");
+  delay(150);
+
+  // Verify presence & order
+  bool haveSpeed=false, haveBoundary=false, haveObstacle=false;
+  unsigned long tSpeed=0,tBound=0,tObs=0;
+  for(int i=0;i<logN;i++){
+    String s = LOGS[i].evt;
+    if(s.startsWith("speed_change")){ haveSpeed=true; if(!tSpeed) tSpeed=LOGS[i].ms; }
+    if(s.startsWith("boundary_detected")){ haveBoundary=true; if(!tBound) tBound=LOGS[i].ms; }
+    if(s.startsWith("obstacle_detected")){ haveObstacle=true; if(!tObs) tObs=LOGS[i].ms; }
+  }
+  if(!(haveSpeed && haveBoundary && haveObstacle)){ ok=false; Serial.println("[FAIL] missing one or more events"); }
+  if(!(tSpeed && tBound && tObs && tSpeed < tBound && tBound < tObs)){ ok=false; Serial.println("[FAIL] event order wrong"); }
+
+  Serial.print("[SUMMARY] UT-LOG-01 -> "); Serial.println(ok? "PASS":"FAIL");
+  while(true) delay(250);
+}
