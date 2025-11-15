@@ -1,8 +1,12 @@
-/* UT-MOT-01 — Motor basic checks (no encoders required)
-   Pass unconditionally after running forward/back safely.
-   Pins: M1_PWM=2 M1_DIR=3, M2_PWM=4 M2_DIR=5, M3_PWM=6 M3_DIR=7, M4_PWM=8 M4_DIR=9.
-   Tip: Lift wheels off the ground. */
-
+/* UT-MOT-01 — Motor Control (direction + 1 m speed checks)
+   Pins: M1_PWM=2 M1_DIR=3, M2_PWM=4 M2_DIR=5, M3_PWM=6 M3_DIR=7, M4_PWM=8 M4_DIR=9
+   How to use:
+     1) Lift wheels, watch direction: Fwd -> wheels spin forward, Back -> reverse.
+        Type 'y' when correct (or 'n' to FAIL).
+     2) Place robot on a 1 m lane. For each PWM target, press 's' to start run,
+        and press 'e' exactly when the nose crosses 1 m mark. Test passes if
+        measured speed is within ±3% of your entered target speed for that PWM.
+*/
 #define M1_PWM 2
 #define M1_DIR 3
 #define M2_PWM 4
@@ -28,6 +32,21 @@ void backward(int s){
 }
 void stopMotors(){ analogWrite(M1_PWM,0); analogWrite(M3_PWM,0); analogWrite(M2_PWM,0); analogWrite(M4_PWM,0); }
 
+bool ask_yes(const char* q){
+  Serial.println(q);
+  while(!Serial.available()){}
+  char c=tolower(Serial.read()); while(Serial.available()) Serial.read();
+  return c=='y';
+}
+float ask_float(const char* q){
+  Serial.println(q);
+  String s=""; while(true){ while(!Serial.available()){} char c=Serial.read(); if(c=='\n' || c=='\r'){ if(s.length()) break; } else s+=c; }
+  return s.toFloat();
+}
+unsigned long wait_key(char want){
+  while(true){ if(Serial.available()){ char c=tolower(Serial.read()); if(c==want){ while(Serial.available()) Serial.read(); return millis(); } } }
+}
+
 void setup(){
   Serial.begin(115200);
   pinMode(M1_PWM,OUTPUT); pinMode(M1_DIR,OUTPUT);
@@ -35,10 +54,40 @@ void setup(){
   pinMode(M3_PWM,OUTPUT); pinMode(M3_DIR,OUTPUT);
   pinMode(M4_PWM,OUTPUT); pinMode(M4_DIR,OUTPUT);
   Serial.println("===== UT-MOT-01 =====");
-  Serial.println("Forward 1.2s @ PWM 120, then backward 1.2s @ PWM 120.");
-  forwardLR(120,120); delay(1200);
-  backward(120);      delay(1200);
-  stopMotors();
-  Serial.println("[SUMMARY] UT-MOT-01 -> PASS");
 }
-void loop(){ while(true) delay(250); }
+
+void loop(){
+  bool pass=true;
+
+  // Direction checks (manual confirm)
+  Serial.println("Lift wheels. Spinning FORWARD @ PWM 120 for 1.2 s … (expect fwd)");
+  forwardLR(120,120); delay(1200); stopMotors(); delay(200);
+  if(!ask_yes("Did the wheels spin FORWARD? (y/n)")) pass=false;
+
+  Serial.println("Spinning BACKWARD @ PWM 120 for 1.2 s … (expect reverse)");
+  backward(120); delay(1200); stopMotors(); delay(200);
+  if(!ask_yes("Did the wheels spin BACKWARD? (y/n)")) pass=false;
+
+  // 1 m timing checks at two speeds (user measures)
+  int pwms[2]={160,200};
+  for(int i=0;i<2;i++){
+    int pwm=pwms[i];
+    float target_cm_s = ask_float(String("Enter TARGET speed (cm/s) you expect at PWM ") + pwm + ":").toFloat();
+    Serial.println("Place on 1 m lane. Press 's' to START run.");
+    unsigned long tS = wait_key('s');
+    forwardLR(pwm,pwm);
+    Serial.println("Press 'e' when nose crosses 1 m mark.");
+    unsigned long tE = wait_key('e');
+    stopMotors();
+
+    float dt_s = (tE - tS)/1000.0f;
+    float v_cm_s = 100.0f / dt_s;
+    float err = 100.0f * fabs(v_cm_s - target_cm_s) / max(1.0f, target_cm_s);
+
+    Serial.print("Measured speed ≈ "); Serial.print(v_cm_s,2); Serial.print(" cm/s, error = "); Serial.print(err,2); Serial.println("%");
+    if(err>3.0f){ Serial.println("[FAIL] speed error > 3%"); pass=false; }
+  }
+
+  Serial.print("[SUMMARY] UT-MOT-01 -> "); Serial.println(pass? "PASS":"FAIL");
+  while(true) delay(250);
+}
