@@ -1,64 +1,103 @@
-/* UT-IMU-01 — IMU LSM6DS33 on I2C
-   Pass if WHO_AM_I reads 0x69 and gyro bytes stream.
-   Wiring (Due 3.3V): VIN->3.3V, GND->GND, SDA->SDA, SCL->SCL. */
+/* UT-IMU-01 — IMU Accuracy (LSM6DS33)
+   Verifies: WHO_AM_I, bias, yaw steps at 0/90/180/270 within ±2.5°, tilt (pitch/roll) at rest <= ±2°.
+   Wiring (Due 3.3 V): VIN->3.3V, GND->GND, SDA->SDA, SCL->SCL. */
 
 #include <Wire.h>
+#include <math.h>
 #define ASSERT_OK(c,msg) do{ if(!(c)){ Serial.print("[FAIL] "); Serial.println(msg); ok=false; } }while(0)
-void hdr(const char* t){ Serial.println(); Serial.print("===== "); Serial.print(t); Serial.println(" ====="); }
 
 #define LSM6_ADDR_PRIMARY 0x6B
 #define LSM6_ADDR_ALT     0x6A
-#define LSM6_REG_WHOAMI   0x0F
-#define LSM6_WHOAMI_VAL   0x69
-#define LSM6_CTRL1_XL     0x10
-#define LSM6_CTRL2_G      0x11
-#define LSM6_CTRL3_C      0x12
-#define LSM6_OUTX_L_G     0x22
-const float GYRO_DPS_PER_LSB = 0.00875f;
+#define WHOAMI 0x0F
+#define WHOAMI_VAL 0x69
+#define CTRL1_XL 0x10
+#define CTRL2_G  0x11
+#define CTRL3_C  0x12
+#define OUTX_L_G 0x22
+#define OUTX_L_A 0x28
 
-uint8_t IMU_ADDR=0;
-bool i2cReadN(uint8_t a,uint8_t r,uint8_t n,uint8_t*b){
+const float GYRO_DPS_PER_LSB=0.00875f;
+const float ACC_G_PER_LSB   =0.000061f;
+
+uint8_t ADDR=0; float yaw=0, bias_gz=0; unsigned long t_us=0;
+
+bool rdN(uint8_t a,uint8_t r,uint8_t n,uint8_t*b){
   Wire.beginTransmission(a); Wire.write(r);
   if(Wire.endTransmission(false)) return false;
   if(Wire.requestFrom(a,n)!=n) return false;
   for(uint8_t i=0;i<n;i++) b[i]=Wire.read(); return true;
 }
-void i2cWrite8(uint8_t a,uint8_t r,uint8_t v){ Wire.beginTransmission(a); Wire.write(r); Wire.write(v); Wire.endTransmission(true); }
+void wr8(uint8_t a,uint8_t r,uint8_t v){ Wire.beginTransmission(a); Wire.write(r); Wire.write(v); Wire.endTransmission(true); }
+
+bool imu_begin(){
+  Wire.begin(); delay(5);
+  uint8_t who=0;
+  if(rdN(LSM6_ADDR_PRIMARY,WHOAMI,1,&who)&&who==WHOAMI_VAL) ADDR=LSM6_ADDR_PRIMARY;
+  else if(rdN(LSM6_ADDR_ALT,WHOAMI,1,&who)&&who==WHOAMI_VAL) ADDR=LSM6_ADDR_ALT;
+  else return false;
+  wr8(ADDR,CTRL3_C,0x44); 
+  wr8(ADDR,CTRL1_XL,0x40); 
+  wr8(ADDR,CTRL2_G, 0x40);
+  delay(40); return true;
+}
+bool rd_gz(int16_t& gz){
+  uint8_t b[6]; if(!rdN(ADDR,OUTX_L_G,6,b)) return false;
+  gz=(int16_t)(b[5]<<8 | b[4]); return true;
+}
+bool rd_acc(int16_t& ax,int16_t& ay,int16_t& az){
+  uint8_t b[6]; if(!rdN(ADDR,OUTX_L_A,6,b)) return false;
+  ax=(int16_t)(b[1]<<8 | b[0]); ay=(int16_t)(b[3]<<8 | b[2]); az=(int16_t)(b[5]<<8 | b[4]); return true;
+}
+void imu_calib(){
+  const int N=400; long acc=0; int16_t gz=0;
+  for(int i=0;i<N;i++){ if(rd_gz(gz)) acc+=gz; delay(3); }
+  bias_gz=(acc/(float)N)*GYRO_DPS_PER_LSB;
+}
+void imu_update(){
+  int16_t gz_raw=0; if(!rd_gz(gz_raw)) return;
+  unsigned long now=micros(); if(!t_us){ t_us=now; return; }
+  float dt=(now - t_us)*1e-6f; t_us=now;
+  float gz=gz_raw*GYRO_DPS_PER_LSB - bias_gz;
+  yaw += gz*dt; if(yaw>180) yaw-=360; else if(yaw<-180) yaw+=360;
+}
+float tilt_deg(){
+  int16_t ax,ay,az; if(!rd_acc(ax,ay,az)) return 999;
+  float x=ax*ACC_G_PER_LSB, y=ay*ACC_G_PER_LSB, z=az*ACC_G_PER_LSB;
+  float norm=sqrt(x*x+y*y+z*z)+1e-9;
+  float pitch=asin(constrain(x/norm,-1.0f,1.0f))*180.0f/3.14159f;
+  float roll =asin(constrain(y/norm,-1.0f,1.0f))*180.0f/3.14159f;
+  return max(fabs(pitch), fabs(roll));
+}
 
 void setup(){
-  Serial.begin(115200); hdr("UT-IMU-01");
-  Wire.begin(); delay(5);
+  Serial.begin(115200);
+  Serial.println("===== UT-IMU-01 =====");
   bool ok=true;
 
-  uint8_t who=0;
-  if(i2cReadN(LSM6_ADDR_PRIMARY, LSM6_REG_WHOAMI, 1, &who) && who==LSM6_WHOAMI_VAL) IMU_ADDR=LSM6_ADDR_PRIMARY;
-  else if(i2cReadN(LSM6_ADDR_ALT, LSM6_REG_WHOAMI, 1, &who) && who==LSM6_WHOAMI_VAL) IMU_ADDR=LSM6_ADDR_ALT;
+  ASSERT_OK(imu_begin(), "IMU not detected");
+  Serial.println("Keep still… calibrating bias …");
+  imu_calib();
 
-  Serial.print("WHO_AM_I = 0x"); Serial.println(who,HEX);
-  ASSERT_OK(IMU_ADDR!=0, "IMU not detected");
+  // Tilt (should be small at rest)
+  float maxTilt=0; unsigned long t0=millis();
+  while(millis()-t0<800){ maxTilt=max(maxTilt, tilt_deg()); delay(20); }
+  Serial.print("Max tilt at rest ≈ "); Serial.print(maxTilt,1); Serial.println(" deg");
+  ASSERT_OK(maxTilt<=2.0f, "Tilt > 2 deg at rest");
 
-  if(IMU_ADDR){
-    i2cWrite8(IMU_ADDR, LSM6_CTRL3_C, 0x44); 
-    i2cWrite8(IMU_ADDR, LSM6_CTRL1_XL, 0x40); 
-    i2cWrite8(IMU_ADDR, LSM6_CTRL2_G,  0x40);
-    delay(40);
-
-
-    uint8_t b[6]; int samples=0; float maxAbs=0;
-    unsigned long t0=millis();
-    while(millis()-t0<800){
-      if(i2cReadN(IMU_ADDR, LSM6_OUTX_L_G, 6, b)){
-        int16_t gz=(int16_t)(b[5]<<8 | b[4]);
-        float gz_dps=gz*GYRO_DPS_PER_LSB;
-        if(fabs(gz_dps)>maxAbs) maxAbs=fabs(gz_dps);
-        samples++;
-      }
-      delay(5);
-    }
-    Serial.print("Gyro samples="); Serial.print(samples);
-    Serial.print(", max|gz|≈"); Serial.print(maxAbs,1); Serial.println(" dps");
-    ASSERT_OK(samples>=20, "Gyro not readable");
+  // Yaw steps
+  int targets[4]={0,90,180,270};
+  float errs=0; int Nok=0;
+  for(int i=0;i<4;i++){
+    Serial.print("Rotate to ~"); Serial.print(targets[i]); Serial.println(" deg, then press ENTER.");
+    while(!Serial.available()) imu_update();
+    while(Serial.available()) Serial.read();
+    // settle 0.5 s of integration
+    unsigned long t=millis(); while(millis()-t<500){ imu_update(); delay(5); }
+    float e=fabs(yaw - targets[i]); if(e>180) e=360-e;
+    Serial.print("yaw="); Serial.print(yaw,1); Serial.print(" deg, error="); Serial.print(e,2); Serial.println(" deg");
+    if(e<=2.5f){ Nok++; errs+=e; } else { ok=false; Serial.println("[FAIL] yaw error > 2.5 deg"); }
   }
+
   Serial.print("[SUMMARY] UT-IMU-01 -> "); Serial.println(ok? "PASS":"FAIL");
 }
 
