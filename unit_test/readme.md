@@ -1,5 +1,5 @@
 # Unit Tests 
-This stage-based unit-test summary includes all the components test for current project process
+This stage-based unit test summary includes all the components test for current project process
 ## UT-MOT-01 — Motor Control
 Verifies wheel directions and checks run speed on a 1 m lane. **Pass** if directions match and measured speed is within **±3%** of target.
 
