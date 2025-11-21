@@ -5,9 +5,7 @@
 #define M A1
 #define R A2
 
-// --- Ultrasonic sensors (front, low & high) ---
-#define US_LOW_TRIG   22
-#define US_LOW_ECHO   23
+// --- Ultrasonic sensor (front, HIGH only) ---
 #define US_HIGH_TRIG  24
 #define US_HIGH_ECHO  25
 
@@ -21,46 +19,39 @@
 #define M4_PWM 8
 #define M4_DIR 9
 
-
 // Line thresholds (set these to your measured values)
-int TH_L = 780, TH_M = 780, TH_R = 780;
+int TH_L = 795, TH_M = 795, TH_R = 795;
 
-int BASE_SPEED   = 180;  // cruise (was 90)
-int PUSH_SPEED   = 90;   // gentle push for cubes
-int AVOID_SPEED  = 180;  // obstacle/edge spin
+int BASE_SPEED   = 180;  // cruise
+int PUSH_SPEED   = 90;   // (unused now, kept for future)
+int AVOID_SPEED  = 180;  // spin speed
 int BACK_SPEED   = 200;  // strong back-out
 
 // Edge handling timings (ms)
 int BACK_MS          = 600;   // back straight at least this long
 int BACK_MAX_MS      = 900;   // hard cap on backing
-int SPIN_MIN_MS      = 1000;  // min spin to clear edge
-int SPIN_MAX_MS      = 1500;  // hard cap on spin
 int LINE_COOLDOWN_MS = 200;   // ignore line sensors after spin
 
 // Ultrasonic scheduling/filtering
-const unsigned long US_PERIOD_MS = 60;     // per-sensor period (staggered)
+const unsigned long US_PERIOD_MS = 60;     // period for high sonar
 const unsigned long US_TO_US     = 24000;  // pulseIn timeout (μs)
 const float US_ALPHA             = 0.45f;  // low-pass (0..1)
 
-// === NEAR gating distances ===
-const float LOW_NEAR_CM  = 10.0f;  // was 5.0
-const float HIGH_NEAR_CM = 20.0f;  // was 10.0
+// NEAR gating distance for high ultrasonic
+const float HIGH_NEAR_CM = 20.0f;  // within this -> 180° turn
 
 // Debounce: require N consecutive near hits
-const uint8_t NEAR_CONFIRM_N = 4;  // was 3
+const uint8_t NEAR_CONFIRM_N = 4;
 const uint8_t NEAR_DROP_N    = 2;
 
 // Turnaround
-const float BOTH_TURN_LOW_CM  = 10.0f;  // was 5.0
-const float BOTH_TURN_HIGH_CM = 20.0f;  // was 10.0
 int   TURNAROUND_SPEED   = 180;
 int   TURNAROUND_TIME_MS = 1100;   // ~180° (tune ±100)
+const float MS_PER_DEG   = TURNAROUND_TIME_MS / 180.0f; // ms of spin per degree
 
 // -------------------- State machine --------------------
 enum State {
   RUN_FORWARD,
-  PUSH_CUBE,
-  AVOID_OBSTACLE,
   TURN_AROUND,
   EDGE_BACKING,
   EDGE_SPINNING,
@@ -75,17 +66,14 @@ bool lastTurnRight = true;
 unsigned long stateStart = 0;
 unsigned long cooldownStart = 0;
 unsigned long sonarCooldownUntil = 0; 
+unsigned long spinTargetMs = 0;   // how long to spin in EDGE_SPINNING
 
-// -------------------- Ultrasonic cache --------------------
-float us_low_cm  = 10000.0f;
+// -------------------- Ultrasonic cache (HIGH only) --------------------
 float us_high_cm = 10000.0f;
-unsigned long lastPingLow  = 0;
 unsigned long lastPingHigh = 0;
-bool pingLowNext = true;
 
-
-uint8_t lowNearCnt = 0, highNearCnt = 0;
-bool lowNear = false, highNear = false;
+uint8_t highNearCnt = 0;
+bool highNear = false;
 
 // -------------------- Forward decls --------------------
 void forward(int s);
@@ -114,57 +102,38 @@ static inline void updateNear(bool &flag, uint8_t &cnt, bool sampleNear, uint8_t
   else { if (cnt > 0) cnt--; if (cnt <= needDown) flag = false; }
 }
 
+// High ultrasonic only
 static void ultrasonicUpdate() {
   unsigned long now = millis();
-  if (pingLowNext) {
-    if (now - lastPingLow >= US_PERIOD_MS) {
-      float raw = readUS_once(US_LOW_TRIG, US_LOW_ECHO);
-      us_low_cm  = lpFilter(us_low_cm, raw);
-      lastPingLow = now;
-      pingLowNext = false;
+  if (now - lastPingHigh >= US_PERIOD_MS) {
+    float raw = readUS_once(US_HIGH_TRIG, US_HIGH_ECHO);
+    us_high_cm = lpFilter(us_high_cm, raw);
+    lastPingHigh = now;
 
-      bool nearSample = (us_low_cm > 0.0f && us_low_cm <= LOW_NEAR_CM);
-      updateNear(lowNear, lowNearCnt, nearSample, NEAR_CONFIRM_N, NEAR_DROP_N);
-    }
-  } else {
-    if (now - lastPingHigh >= US_PERIOD_MS) {
-      float raw = readUS_once(US_HIGH_TRIG, US_HIGH_ECHO);
-      us_high_cm = lpFilter(us_high_cm, raw);
-      lastPingHigh = now;
-      pingLowNext = true;
-
-      bool nearSample = (us_high_cm > 0.0f && us_high_cm <= HIGH_NEAR_CM);
-      updateNear(highNear, highNearCnt, nearSample, NEAR_CONFIRM_N, NEAR_DROP_N);
-    }
+    bool nearSample = (us_high_cm > 0.0f && us_high_cm <= HIGH_NEAR_CM);
+    updateNear(highNear, highNearCnt, nearSample, NEAR_CONFIRM_N, NEAR_DROP_N);
   }
-}
-
-static inline bool bothVeryClose(){
-  return (us_low_cm  <= BOTH_TURN_LOW_CM) &&
-         (us_high_cm <= BOTH_TURN_HIGH_CM) &&
-         lowNear && highNear;
 }
 
 // -------------------- Setup --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== Snowplow (near-gated sonar + line priority) ===");
+  Serial.println("=== Snowplow (high sonar + line edge logic) ===");
 
   pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
   pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
   pinMode(M3_PWM, OUTPUT); pinMode(M3_DIR, OUTPUT);
   pinMode(M4_PWM, OUTPUT); pinMode(M4_DIR, OUTPUT);
 
-  pinMode(US_LOW_TRIG, OUTPUT);
-  pinMode(US_LOW_ECHO, INPUT);
   pinMode(US_HIGH_TRIG, OUTPUT);
   pinMode(US_HIGH_ECHO, INPUT);
 
   // Seed sonar values
-  us_low_cm  = readUS_once(US_LOW_TRIG,  US_LOW_ECHO);
   us_high_cm = readUS_once(US_HIGH_TRIG, US_HIGH_ECHO);
-  lowNear  = (us_low_cm  > 0.0f && us_low_cm  <= LOW_NEAR_CM);
-  highNear = (us_high_cm > 0.0f && us_high_cm <= HIGH_NEAR_CM);
+  highNear   = (us_high_cm > 0.0f && us_high_cm <= HIGH_NEAR_CM);
+
+  // Seed RNG for random 70°–130° spins
+  randomSeed(analogRead(A3));  // use any free analog pin
 
   stopMotors();
   delay(200);
@@ -186,53 +155,88 @@ void loop() {
   R_black = (Rval > TH_R);
 #endif
 
-
+  // ---------- Line sensor edge logic ----------
 #if USE_LINE_SENSORS
   if ((L_black || M_black || R_black) &&
-      !(state == EDGE_BACKING || state == EDGE_SPINNING || state == LINE_COOLDOWN))
+      !(state == EDGE_BACKING || state == EDGE_SPINNING || state == LINE_COOLDOWN || state == TURN_AROUND))
   {
-    plannedTurn = lastTurnRight ? TURN_LEFT : TURN_RIGHT; // alternate to avoid trapping
-    lastTurnRight = !lastTurnRight;
+    uint8_t blackCount = (L_black ? 1 : 0) + (M_black ? 1 : 0) + (R_black ? 1 : 0);
 
-    Serial.print("[EDGE] L/M/R = "); Serial.print(Lval); Serial.print("/");
-    Serial.print(Mval); Serial.print("/"); Serial.println(Rval);
+    Serial.print("[EDGE] L/M/R = ");
+    Serial.print(Lval); Serial.print("/");
+    Serial.print(Mval); Serial.print("/");
+    Serial.println(Rval);
 
-    stopMotors(); delay(25);
-    stateStart = millis();
-    state = EDGE_BACKING;
+    // Case A: more than one sensor sees black -> 180° TURNAROUND
+    if (blackCount >= 2) {
+      plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT; // alternate
+      lastTurnRight = !lastTurnRight;
+
+      Serial.println("  -> MULTI-SENSOR -> 180° TURN_AROUND");
+      stopMotors(); delay(25);
+      stateStart = millis();
+      state      = TURN_AROUND;
+    }
+    // Case B: ONLY left sensor black -> back + random RIGHT spin (70°–130°)
+    else if (L_black) {  // here blackCount == 1, so M and R are false
+      plannedTurn   = TURN_RIGHT;
+      lastTurnRight = true;
+
+      long angleDeg = random(70, 131); // [70,130] degrees
+      spinTargetMs  = (unsigned long)(angleDeg * MS_PER_DEG);
+
+      Serial.print("  -> LEFT ONLY -> BACK + RIGHT spin ~");
+      Serial.print(angleDeg);
+      Serial.println("°");
+
+      stopMotors(); delay(25);
+      stateStart = millis();
+      state      = EDGE_BACKING;
+    }
+    // Case C: ONLY right sensor black -> back + random LEFT spin (70°–130°)
+    else if (R_black) {  // here blackCount == 1, so L and M are false
+      plannedTurn   = TURN_LEFT;
+      lastTurnRight = false;
+
+      long angleDeg = random(70, 131); // [70,130] degrees
+      spinTargetMs  = (unsigned long)(angleDeg * MS_PER_DEG);
+
+      Serial.print("  -> RIGHT ONLY -> BACK + LEFT spin ~");
+      Serial.print(angleDeg);
+      Serial.println("°");
+
+      stopMotors(); delay(25);
+      stateStart = millis();
+      state      = EDGE_BACKING;
+    }
+    // Case D: ONLY middle sensor black -> treat as 180° TURN_AROUND
+    else if (M_black) {
+      plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
+      lastTurnRight = !lastTurnRight;
+
+      Serial.println("  -> MIDDLE ONLY -> 180° TURN_AROUND");
+      stopMotors(); delay(25);
+      stateStart = millis();
+      state      = TURN_AROUND;
+    }
   }
 #endif
 
+  // ---------- State machine ----------
   switch (state) {
     case RUN_FORWARD: {
       // Ignore sonar for a short time after spins/turns
       bool sonarArmed = (millis() >= sonarCooldownUntil);
 
-      if (sonarArmed && bothVeryClose()) {
-        Serial.println("[TURN] both near & very close -> 180°");
+      // High ultrasonic near -> 180° turn-around
+      if (sonarArmed && highNear) {
+        Serial.println("[TURN] HIGH sonar near -> 180°");
         stopMotors(); delay(10);
         stateStart = millis();
         // alternate turn direction on each 180°
-        plannedTurn = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
+        plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
         lastTurnRight = !lastTurnRight;
-        state = TURN_AROUND;
-        break;
-      }
-
-      if (sonarArmed && highNear) {
-        // Tall obstacle within 10 cm -> avoid
-        stopMotors(); delay(10);
-        stateStart = millis();
-        plannedTurn = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
-        lastTurnRight = !lastTurnRight;
-        state = AVOID_OBSTACLE;
-        Serial.println("[AHEAD] TALL (near) -> AVOID");
-        break;
-      }
-      if (sonarArmed && lowNear && !highNear) {
-        // Cube (snow) within 5 cm -> push
-        state = PUSH_CUBE;
-        Serial.println("[AHEAD] CUBE (near) -> PUSH");
+        state         = TURN_AROUND;
         break;
       }
 
@@ -240,35 +244,10 @@ void loop() {
       break;
     }
 
-    case PUSH_CUBE: {
-      if (lowNear && !highNear) {
-        forward(PUSH_SPEED);
-      } else {
-        stopMotors(); delay(10);
-        state = RUN_FORWARD;
-        sonarCooldownUntil = millis() + 250; // brief ignore to prevent instant re-trigger
-        Serial.println("PUSH done -> RUN");
-      }
-      break;
-    }
-
-    case AVOID_OBSTACLE: {
-      if (plannedTurn == TURN_LEFT) turnLeft(AVOID_SPEED);
-      else                          turnRight(AVOID_SPEED);
-
-      unsigned long t = millis() - stateStart;
-      if (!highNear || t >= 1300) {
-        stopMotors(); delay(15);
-        state = RUN_FORWARD;
-        sonarCooldownUntil = millis() + 300; // prevent instant re-trigger from room reflections
-        Serial.println("AVOID done -> RUN");
-      }
-      break;
-    }
-
     case TURN_AROUND: {
       if (plannedTurn == TURN_LEFT) turnLeft(TURNAROUND_SPEED);
       else                          turnRight(TURNAROUND_SPEED);
+
       if (millis() - stateStart >= (unsigned long)TURNAROUND_TIME_MS) {
         stopMotors(); delay(15);
         state = RUN_FORWARD;
@@ -284,7 +263,7 @@ void loop() {
       if (dt >= (unsigned long)BACK_MS || dt >= (unsigned long)BACK_MAX_MS) {
         stopMotors(); delay(30);
         stateStart = millis();
-        state = EDGE_SPINNING;
+        state      = EDGE_SPINNING;
         Serial.println("Backed -> SPIN");
       }
       break;
@@ -295,14 +274,14 @@ void loop() {
       else                          turnRight(AVOID_SPEED);
 
       unsigned long dt = millis() - stateStart;
-      bool canFinish  = (dt >= (unsigned long)SPIN_MIN_MS);
-      bool mustFinish = (dt >= (unsigned long)SPIN_MAX_MS);
-      if (mustFinish || (canFinish && !highNear)) {
+      if (dt >= spinTargetMs) {
         stopMotors();
-        cooldownStart = millis();
-        state = LINE_COOLDOWN;
+        cooldownStart     = millis();
+        state             = LINE_COOLDOWN;
         sonarCooldownUntil = millis() + 300;
-        Serial.println("SPIN -> COOLDOWN");
+        Serial.print("SPIN done (");
+        Serial.print(dt);
+        Serial.println(" ms) -> COOLDOWN");
       }
       break;
     }
