@@ -1,0 +1,453 @@
+#include <Arduino_FreeRTOS.h>
+#include <task.h>
+
+#define USE_LINE_SENSORS 1
+
+// 任务里的简化延时宏
+#define RTOS_DELAY(ms) vTaskDelay(pdMS_TO_TICKS(ms))
+
+// --- Line sensors (front) ---
+#define L A0
+#define M A1
+#define R A2
+
+// --- Ultrasonic sensors (front, LEFT & RIGHT high) ---
+#define US_LEFT_TRIG   24
+#define US_LEFT_ECHO   25
+#define US_RIGHT_TRIG  29
+#define US_RIGHT_ECHO  27
+
+// --- Motor pins (unchanged) ---
+#define M1_PWM 2
+#define M1_DIR 3
+#define M2_PWM 4
+#define M2_DIR 5
+#define M3_PWM 6
+#define M3_DIR 7
+#define M4_PWM 8
+#define M4_DIR 9
+
+// Line thresholds (set these to your measured values)
+int TH_L = 795, TH_M = 795, TH_R = 795;
+
+int BASE_SPEED   = 90;   // cruise
+int AVOID_SPEED  = 180;  // spin speed
+int BACK_SPEED   = 200;  // strong back-out
+
+// Edge handling timings (ms)
+int BACK_MS          = 600;   // back straight at least this long
+int BACK_MAX_MS      = 900;   // hard cap on backing
+int LINE_COOLDOWN_MS = 200;   // ignore line sensors after spin
+
+// Ultrasonic scheduling/filtering
+const unsigned long US_PERIOD_MS = 60;     // per-sensor period (staggered)
+const unsigned long US_TO_US     = 24000;  // pulseIn timeout (μs)
+const float US_ALPHA             = 0.45f;  // low-pass (0..1)
+
+// NEAR gating distance for ultrasonic
+const float HIGH_NEAR_CM = 20.0f;  // within this -> 180° turn
+
+// Debounce: require N consecutive near hits (for sonar)
+const uint8_t NEAR_CONFIRM_N = 4;
+const uint8_t NEAR_DROP_N    = 2;
+
+// Turnaround (used for 180° and for degree→ms scaling)
+int   TURNAROUND_SPEED   = 180;
+int   TURNAROUND_TIME_MS = 2200;   // ~180° (tune ±100)
+const float MS_PER_DEG    = TURNAROUND_TIME_MS / 180.0f;
+const float SIDE_TURN_DEG = 120.0f;  // fixed 120° side turn for L-only / R-only
+
+// -------------------- State machine --------------------
+enum State {
+  RUN_FORWARD,
+  TURN_AROUND,
+  EDGE_BACKING,
+  EDGE_SPINNING,
+  LINE_COOLDOWN
+};
+State state = RUN_FORWARD;
+
+enum TurnDir { TURN_RIGHT, TURN_LEFT };
+TurnDir plannedTurn = TURN_RIGHT;
+bool lastTurnRight = true; 
+
+unsigned long stateStart = 0;
+unsigned long cooldownStart = 0;
+unsigned long sonarCooldownUntil = 0; 
+unsigned long spinTargetMs = 0;   // how long to spin in EDGE_SPINNING
+
+// -------------------- Ultrasonic cache (LEFT & RIGHT) --------------------
+// 这些会在 TaskSonar 中更新，在 TaskControl 中读取 → volatile
+volatile float us_left_cm  = 10000.0f;
+volatile float us_right_cm = 10000.0f;
+unsigned long lastPingLeft  = 0;
+unsigned long lastPingRight = 0;
+bool pingLeftNext = true;
+
+volatile uint8_t leftNearCnt  = 0, rightNearCnt = 0;
+volatile bool leftNear  = false, rightNear = false;
+
+// -------------------- Forward decls --------------------
+void forward(int s);
+void backward(int s);
+void turnLeft(int s);
+void turnRight(int s);
+void stopMotors();
+
+// RTOS 任务函数
+void TaskSonar(void *pvParameters);
+void TaskControl(void *pvParameters);
+
+// -------------------- Utilities --------------------
+static inline void pulseTrig(int pin) {
+  digitalWrite(pin, LOW); delayMicroseconds(2);
+  digitalWrite(pin, HIGH); delayMicroseconds(10);
+  digitalWrite(pin, LOW);
+}
+static float readUS_once(int trig, int echo) {
+  pulseTrig(trig);
+  unsigned long dur = pulseIn(echo, HIGH, US_TO_US);
+  if (dur == 0) return 10000.0f;           
+  return (dur * 0.0343f) * 0.5f;           
+}
+static float lpFilter(float prev, float newest) {
+  return (1.0f - US_ALPHA) * prev + US_ALPHA * newest;
+}
+static inline void updateNear(volatile bool &flag, volatile uint8_t &cnt,
+                              bool sampleNear, uint8_t needUp, uint8_t needDown){
+  if (sampleNear) {
+    if (cnt < 255) cnt++;
+    if (cnt >= needUp) flag = true;
+  } else {
+    if (cnt > 0) cnt--;
+    if (cnt <= needDown) flag = false;
+  }
+}
+
+// Read LEFT & RIGHT ultrasonics, staggered so they don't interfere
+// 只在 TaskSonar 中被调用
+static void ultrasonicUpdate() {
+  unsigned long now = millis();
+  if (pingLeftNext) {
+    if (now - lastPingLeft >= US_PERIOD_MS) {
+      float raw = readUS_once(US_LEFT_TRIG, US_LEFT_ECHO);
+      us_left_cm  = lpFilter(us_left_cm, raw);
+      lastPingLeft = now;
+      pingLeftNext = false;
+
+      bool nearSample = (us_left_cm > 0.0f && us_left_cm <= HIGH_NEAR_CM);
+      updateNear(leftNear, leftNearCnt, nearSample, NEAR_CONFIRM_N, NEAR_DROP_N);
+    }
+  } else {
+    if (now - lastPingRight >= US_PERIOD_MS) {
+      float raw = readUS_once(US_RIGHT_TRIG, US_RIGHT_ECHO);
+      us_right_cm = lpFilter(us_right_cm, raw);
+      lastPingRight = now;
+      pingLeftNext = true;
+
+      bool nearSample = (us_right_cm > 0.0f && us_right_cm <= HIGH_NEAR_CM);
+      updateNear(rightNear, rightNearCnt, nearSample, NEAR_CONFIRM_N, NEAR_DROP_N);
+    }
+  }
+}
+
+// -------------------- Setup --------------------
+void setup() {
+  Serial.begin(115200);
+  Serial.println("=== Snowplow (dual high sonar + debounced line edge logic, FreeRTOS) ===");
+
+  pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
+  pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
+  pinMode(M3_PWM, OUTPUT); pinMode(M3_DIR, OUTPUT);
+  pinMode(M4_PWM, OUTPUT); pinMode(M4_DIR, OUTPUT);
+
+  pinMode(US_LEFT_TRIG,  OUTPUT);
+  pinMode(US_LEFT_ECHO,  INPUT);
+  pinMode(US_RIGHT_TRIG, OUTPUT);
+  pinMode(US_RIGHT_ECHO, INPUT);
+
+#if USE_LINE_SENSORS
+  pinMode(L, INPUT);
+  pinMode(M, INPUT);
+  pinMode(R, INPUT);
+#endif
+
+  // Seed sonar values
+  us_left_cm  = readUS_once(US_LEFT_TRIG,  US_LEFT_ECHO);
+  us_right_cm = readUS_once(US_RIGHT_TRIG, US_RIGHT_ECHO);
+  leftNear    = (us_left_cm  > 0.0f && us_left_cm  <= HIGH_NEAR_CM);
+  rightNear   = (us_right_cm > 0.0f && us_right_cm <= HIGH_NEAR_CM);
+
+  stopMotors();
+  delay(200);
+  Serial.println("Ready, starting scheduler...");
+
+  // 创建任务：声呐任务优先级高一点
+  xTaskCreate(
+    TaskSonar,
+    "Sonar",
+    256,
+    NULL,
+    2,      // 优先级 2
+    NULL
+  );
+
+  // 控制任务：状态机 + 线传感器 + 电机控制
+  xTaskCreate(
+    TaskControl,
+    "Control",
+    512,
+    NULL,
+    1,      // 优先级 1
+    NULL
+  );
+
+  // 启动调度器（之后不会再回到 setup/loop）
+  vTaskStartScheduler();
+
+  Serial.println("ERROR: Scheduler failed to start!");
+}
+
+void loop() {
+  // FreeRTOS 接管调度，这里不会被用到
+}
+
+// -------------------- RTOS 任务实现 --------------------
+
+// 任务 1：周期性更新声呐数据（代替原来 loop 顶部的 ultrasonicUpdate()）
+void TaskSonar(void *pvParameters) {
+  (void) pvParameters;
+  for(;;) {
+    ultrasonicUpdate();
+    // ultrasonicUpdate 内部自己用 US_PERIOD_MS 控速，这里 5ms tick 就够了
+    RTOS_DELAY(5);
+  }
+}
+
+// 任务 2：原来的 loop() 主体（去掉 ultrasonicUpdate + delay → RTOS_DELAY）
+void TaskControl(void *pvParameters) {
+  (void) pvParameters;
+
+  for(;;) {
+    int Lval=0, Mval=0, Rval=0;
+    bool L_black=false, M_black=false, R_black=false;
+
+#if USE_LINE_SENSORS
+    Lval = analogRead(L);
+    Mval = analogRead(M);
+    Rval = analogRead(R);
+
+    L_black = (Lval > TH_L);
+    M_black = (Mval > TH_M);
+    R_black = (Rval > TH_R);
+#endif
+
+    // ---------- Line sensor edge logic ----------
+#if USE_LINE_SENSORS
+    if ((L_black || M_black || R_black) &&
+        !(state == EDGE_BACKING || state == EDGE_SPINNING || state == LINE_COOLDOWN || state == TURN_AROUND))
+    {
+      uint8_t blackCount = (L_black ? 1 : 0) + (M_black ? 1 : 0) + (R_black ? 1 : 0);
+
+      Serial.print("[EDGE] L/M/R = ");
+      Serial.print(Lval); Serial.print("/");
+      Serial.print(Mval); Serial.print("/");
+      Serial.println(Rval);
+
+      // Case A: more than one sensor sees black -> instant 180° TURNAROUND (no backing)
+      if (blackCount >= 2) {
+        plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT; // alternate
+        lastTurnRight = !lastTurnRight;
+
+        Serial.println("  -> MULTI-SENSOR -> 180° TURN_AROUND (instant)");
+        stopMotors(); RTOS_DELAY(25);
+        stateStart = millis();
+        state      = TURN_AROUND;
+      }
+      // Case B: ONLY left sensor black -> back + fixed 120° RIGHT spin
+      else if (L_black) {
+        plannedTurn   = TURN_RIGHT;
+        lastTurnRight = true;
+
+        spinTargetMs  = (unsigned long)(SIDE_TURN_DEG * MS_PER_DEG);
+
+        Serial.print("  -> LEFT ONLY -> BACK + RIGHT spin ~");
+        Serial.print(SIDE_TURN_DEG);
+        Serial.println("°");
+
+        stopMotors(); RTOS_DELAY(25);
+        stateStart = millis();
+        state      = EDGE_BACKING;
+      }
+      // Case C: ONLY right sensor black -> back + fixed 120° LEFT spin
+      else if (R_black) {
+        plannedTurn   = TURN_LEFT;
+        lastTurnRight = false;
+
+        spinTargetMs  = (unsigned long)(SIDE_TURN_DEG * MS_PER_DEG);
+
+        Serial.print("  -> RIGHT ONLY -> BACK + LEFT spin ~");
+        Serial.print(SIDE_TURN_DEG);
+        Serial.println("°");
+
+        stopMotors(); RTOS_DELAY(25);
+        stateStart = millis();
+        state      = EDGE_BACKING;
+      }
+      // Case D: ONLY middle sensor black -> instant 180° TURN_AROUND (no backing)
+      else if (M_black) {
+        plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
+        lastTurnRight = !lastTurnRight;
+
+        Serial.println("  -> MIDDLE ONLY -> 180° TURN_AROUND (instant)");
+        stopMotors(); RTOS_DELAY(25);
+        stateStart = millis();
+        state      = TURN_AROUND;
+      }
+    }
+#endif
+
+    // ---------- State machine ----------
+    switch (state) {
+      case RUN_FORWARD: {
+        bool sonarArmed = (millis() >= sonarCooldownUntil);
+
+        // 左右任一声呐 near -> 180° turn-around
+        if (sonarArmed && (leftNear || rightNear)) {
+          Serial.print("[TURN] sonar near: L=");
+          Serial.print(us_left_cm);
+          Serial.print(" cm, R=");
+          Serial.print(us_right_cm);
+          Serial.println(" cm -> 180°");
+
+          stopMotors(); RTOS_DELAY(10);
+          stateStart = millis();
+
+          // Choose spin direction based on which side is near
+          if (leftNear && !rightNear) {
+            plannedTurn   = TURN_RIGHT;
+            lastTurnRight = true;
+          } else if (rightNear && !leftNear) {
+            plannedTurn   = TURN_LEFT;
+            lastTurnRight = false;
+          } else {  // both near -> alternate
+            plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
+            lastTurnRight = !lastTurnRight;
+          }
+
+          state = TURN_AROUND;
+          break;
+        }
+
+        forward(BASE_SPEED);
+        break;
+      }
+
+      case TURN_AROUND: {
+        if (plannedTurn == TURN_LEFT) turnLeft(TURNAROUND_SPEED);
+        else                          turnRight(TURNAROUND_SPEED);
+
+        if (millis() - stateStart >= (unsigned long)TURNAROUND_TIME_MS) {
+          stopMotors(); RTOS_DELAY(15);
+          state = RUN_FORWARD;
+          sonarCooldownUntil = millis() + 300;
+          Serial.println("TURN_AROUND done -> RUN");
+        }
+        break;
+      }
+
+      case EDGE_BACKING: {
+        backward(BACK_SPEED);
+        unsigned long dt = millis() - stateStart;
+        if (dt >= (unsigned long)BACK_MS || dt >= (unsigned long)BACK_MAX_MS) {
+          stopMotors(); RTOS_DELAY(30);
+          stateStart = millis();
+          state      = EDGE_SPINNING;
+          Serial.println("Backed -> SPIN");
+        }
+        break;
+      }
+
+      case EDGE_SPINNING: {
+        if (plannedTurn == TURN_LEFT) turnLeft(AVOID_SPEED);
+        else                          turnRight(AVOID_SPEED);
+
+        unsigned long dt = millis() - stateStart;
+        if (dt >= spinTargetMs) {
+          stopMotors();
+          cooldownStart      = millis();
+          state              = LINE_COOLDOWN;
+          sonarCooldownUntil = millis() + 300;
+          Serial.print("SPIN done (");
+          Serial.print(dt);
+          Serial.println(" ms) -> COOLDOWN");
+        }
+        break;
+      }
+
+      case LINE_COOLDOWN: {
+        forward(BASE_SPEED);
+        if (millis() - cooldownStart >= (unsigned long)LINE_COOLDOWN_MS) {
+          state = RUN_FORWARD;
+          Serial.println("COOLDOWN -> RUN");
+        }
+        break;
+      }
+    }
+
+    // 原来的 delay(5)
+    RTOS_DELAY(5);
+  }
+}
+
+// -------------------- Motor helpers --------------------
+void forward(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, LOW);
+  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, HIGH);
+  digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+void backward(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, HIGH);
+  digitalWrite(M3_DIR, HIGH);
+  digitalWrite(M2_DIR, LOW);
+  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+void turnLeft(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, HIGH);
+  digitalWrite(M3_DIR, HIGH);
+  digitalWrite(M2_DIR, HIGH);
+  digitalWrite(M4_DIR, HIGH);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+void turnRight(int s) {
+  s = constrain(s, 0, 255);
+  digitalWrite(M1_DIR, LOW);
+  digitalWrite(M3_DIR, LOW);
+  digitalWrite(M2_DIR, LOW);
+  digitalWrite(M4_DIR, LOW);
+  analogWrite(M1_PWM, s);
+  analogWrite(M3_PWM, s);
+  analogWrite(M2_PWM, s);
+  analogWrite(M4_PWM, s);
+}
+void stopMotors() {
+  analogWrite(M1_PWM, 0);
+  analogWrite(M3_PWM, 0);
+  analogWrite(M2_PWM, 0);
+  analogWrite(M4_PWM, 0);
+}
