@@ -22,16 +22,21 @@
 #define M4_DIR 9
 
 // Line thresholds (set these to your measured values)
-int TH_L = 720, TH_M = 720, TH_R = 720;
+int TH_L = 820, TH_M = 820, TH_R = 820;
 
-int BASE_SPEED   = 135;   // cruise
-int AVOID_SPEED  = 180;  // spin speed
-int BACK_SPEED   = 200;  // strong back-out
+// ==== SPEEDS (1.5x previous, with PWM clamped to 255) ====
+int BASE_SPEED       = 135;  // was 90  -> 90 * 1.5
+int AVOID_SPEED      = 255;  // was 180 -> 270, but max PWM is 255
+int BACK_SPEED       = 255;  // was 200 -> 300, clamp to 255
+int TURNAROUND_SPEED = 255;  // was 180 -> 270, clamp to 255
 
 // Edge handling timings (ms)
-int BACK_MS          = 600;   // back straight at least this long
-int BACK_MAX_MS      = 900;   // hard cap on backing
-int LINE_COOLDOWN_MS = 200;   // ignore line sensors after spin
+// "Distance" ≈ time at constant BACK_SPEED
+int BACK_MS_SINGLE     = 600;  // single-side back distance (full)
+int BACK_MAX_MS_SINGLE = 900;
+int BACK_MS_SHORT      = 200;  // ~1/3 of single-side distance
+int BACK_MAX_MS_SHORT  = 300;
+int LINE_COOLDOWN_MS   = 200;  // ignore line sensors after spin/turn
 
 // Ultrasonic scheduling/filtering
 const unsigned long US_PERIOD_MS = 60;     // per-sensor period (staggered)
@@ -39,17 +44,18 @@ const unsigned long US_TO_US     = 24000;  // pulseIn timeout (μs)
 const float US_ALPHA             = 0.45f;  // low-pass (0..1)
 
 // NEAR gating distance for ultrasonic
-const float HIGH_NEAR_CM = 15.0f;  // within this -> obstacle turn
+const float HIGH_NEAR_CM = 20.0f;  // within this -> obstacle turn
 
 // Debounce: require N consecutive near hits (for sonar)
 const uint8_t NEAR_CONFIRM_N = 4;
 const uint8_t NEAR_DROP_N    = 2;
 
 // Turnaround (used for degree→ms scaling)
-int   TURNAROUND_SPEED   = 180;
-int   TURNAROUND_TIME_MS = 2200;   // ~180° (tune ±100)
+// Old calibration: 180 PWM, 2200 ms ≈ 180°
+// New: 255 PWM (~1.5x), so scale time by 180/255 ≈ 0.706 -> ~1550 ms
+int   TURNAROUND_TIME_MS = 1550;   // ≈180° at TURNAROUND_SPEED=255 (tune ±50)
 const float MS_PER_DEG    = TURNAROUND_TIME_MS / 180.0f;
-const float SIDE_TURN_DEG = 50.0f;  // fixed ~50° side turn for L-only / R-only
+const float SIDE_TURN_DEG = 50.0f;  // side spin angle for L-only / R-only
 
 // -------------------- State machine --------------------
 enum State {
@@ -63,11 +69,15 @@ State state = RUN_FORWARD;
 
 enum TurnDir { TURN_RIGHT, TURN_LEFT };
 TurnDir plannedTurn = TURN_RIGHT;
-bool lastTurnRight = true; 
+bool lastTurnRight = true;
+
+// How EDGE_BACKING should behave
+enum EdgeBackMode { EDGE_BACK_SPIN, EDGE_BACK_SHORT_TURN };
+EdgeBackMode edgeBackMode = EDGE_BACK_SPIN;
 
 unsigned long stateStart = 0;
 unsigned long cooldownStart = 0;
-unsigned long sonarCooldownUntil = 0; 
+unsigned long sonarCooldownUntil = 0;
 unsigned long spinTargetMs = 0;   // how long to spin in EDGE_SPINNING
 
 // -------------------- Ultrasonic cache (LEFT & RIGHT) --------------------
@@ -96,8 +106,8 @@ static inline void pulseTrig(int pin) {
 static float readUS_once(int trig, int echo) {
   pulseTrig(trig);
   unsigned long dur = pulseIn(echo, HIGH, US_TO_US);
-  if (dur == 0) return 10000.0f;           
-  return (dur * 0.0343f) * 0.5f;           
+  if (dur == 0) return 10000.0f;
+  return (dur * 0.0343f) * 0.5f;
 }
 static float lpFilter(float prev, float newest) {
   return (1.0f - US_ALPHA) * prev + US_ALPHA * newest;
@@ -136,7 +146,7 @@ static void ultrasonicUpdate() {
 // -------------------- Setup --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== Snowplow (dual high sonar + line edge) ===");
+  Serial.println("=== Snowplow (dual sonar + line edge, 1.5x speed) ===");
 
   pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
   pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
@@ -187,21 +197,23 @@ void loop() {
     Serial.print(Mval); Serial.print("/");
     Serial.println(Rval);
 
-    // Case A: more than one sensor sees black -> instant TURN_AROUND (~150°)
+    // --- Multi-sensor or M-only -> short back (1/3) then TURN_AROUND ---
     if (blackCount >= 2) {
+      // 2 or 3 sensors black
       plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT; // alternate
       lastTurnRight = !lastTurnRight;
+      edgeBackMode  = EDGE_BACK_SHORT_TURN;
 
-      Serial.println("  -> MULTI-SENSOR -> TURN_AROUND (instant, ~150°)");
+      Serial.println("  -> MULTI-SENSOR -> SHORT BACK (1/3) + TURN_AROUND");
       stopMotors(); delay(25);
       stateStart = millis();
-      state      = TURN_AROUND;
+      state      = EDGE_BACKING;
     }
-    // Case B: ONLY left sensor black -> back + fixed SIDE_TURN_DEG RIGHT spin
-    else if (L_black) {  // here blackCount == 1, so M and R are false
+    // SINGLE-SIDE: back + spin (old behaviour)
+    else if (L_black) {  // here blackCount == 1, M and R are false
       plannedTurn   = TURN_RIGHT;
       lastTurnRight = true;
-
+      edgeBackMode  = EDGE_BACK_SPIN;
       spinTargetMs  = (unsigned long)(SIDE_TURN_DEG * MS_PER_DEG);
 
       Serial.print("  -> LEFT ONLY -> BACK + RIGHT spin ~");
@@ -212,11 +224,10 @@ void loop() {
       stateStart = millis();
       state      = EDGE_BACKING;
     }
-    // Case C: ONLY right sensor black -> back + fixed SIDE_TURN_DEG LEFT spin
-    else if (R_black) {  // here blackCount == 1, so L and M are false
+    else if (R_black) {  // here blackCount == 1, L and M are false
       plannedTurn   = TURN_LEFT;
       lastTurnRight = false;
-
+      edgeBackMode  = EDGE_BACK_SPIN;
       spinTargetMs  = (unsigned long)(SIDE_TURN_DEG * MS_PER_DEG);
 
       Serial.print("  -> RIGHT ONLY -> BACK + LEFT spin ~");
@@ -227,15 +238,16 @@ void loop() {
       stateStart = millis();
       state      = EDGE_BACKING;
     }
-    // Case D: ONLY middle sensor black -> instant TURN_AROUND (~150°)
+    // M-only: short back (1/3) then TURN_AROUND
     else if (M_black) {
       plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
       lastTurnRight = !lastTurnRight;
+      edgeBackMode  = EDGE_BACK_SHORT_TURN;
 
-      Serial.println("  -> MIDDLE ONLY -> TURN_AROUND (instant, ~150°)");
+      Serial.println("  -> MIDDLE ONLY -> SHORT BACK (1/3) + TURN_AROUND");
       stopMotors(); delay(25);
       stateStart = millis();
-      state      = TURN_AROUND;
+      state      = EDGE_BACKING;
     }
   }
 #endif
@@ -243,7 +255,7 @@ void loop() {
   // ---------- State machine ----------
   switch (state) {
     case RUN_FORWARD: {
-      // Ignore sonar for a short time after spins/turns
+      // Ignore sonar for a short time after backs/turns
       bool sonarArmed = (millis() >= sonarCooldownUntil);
 
       // LEFT or RIGHT ultrasonic near -> obstacle turn (~150°)
@@ -292,13 +304,35 @@ void loop() {
     }
 
     case EDGE_BACKING: {
+      // Back up; duration depends on edgeBackMode
       backward(BACK_SPEED);
       unsigned long dt = millis() - stateStart;
-      if (dt >= (unsigned long)BACK_MS || dt >= (unsigned long)BACK_MAX_MS) {
+
+      int backMsTarget;
+      int backMaxTarget;
+
+      if (edgeBackMode == EDGE_BACK_SPIN) {
+        backMsTarget  = BACK_MS_SINGLE;
+        backMaxTarget = BACK_MAX_MS_SINGLE;
+      } else { // EDGE_BACK_SHORT_TURN
+        backMsTarget  = BACK_MS_SHORT;
+        backMaxTarget = BACK_MAX_MS_SHORT;
+      }
+
+      if (dt >= (unsigned long)backMsTarget || dt >= (unsigned long)backMaxTarget) {
         stopMotors(); delay(30);
-        stateStart = millis();
-        state      = EDGE_SPINNING;
-        Serial.println("Backed -> SPIN");
+
+        if (edgeBackMode == EDGE_BACK_SPIN) {
+          // Single-side: full back, then spin
+          stateStart = millis();
+          state      = EDGE_SPINNING;
+          Serial.println("Backed from single-side edge -> SPIN");
+        } else {
+          // Center / multi: short back, then TURN_AROUND
+          stateStart = millis();
+          state      = TURN_AROUND;
+          Serial.println("Short back from center/multi -> TURN_AROUND");
+        }
       }
       break;
     }
@@ -321,6 +355,7 @@ void loop() {
     }
 
     case LINE_COOLDOWN: {
+      // Drive forward a bit while ignoring line sensors to avoid immediate retrigger
       forward(BASE_SPEED);
       if (millis() - cooldownStart >= (unsigned long)LINE_COOLDOWN_MS) {
         state = RUN_FORWARD;
