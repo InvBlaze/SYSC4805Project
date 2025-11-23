@@ -22,9 +22,9 @@
 #define M4_DIR 9
 
 // Line thresholds (set these to your measured values)
-int TH_L = 795, TH_M = 795, TH_R = 795;
+int TH_L = 720, TH_M = 720, TH_R = 720;
 
-int BASE_SPEED   = 90;   // cruise
+int BASE_SPEED   = 135;   // cruise
 int AVOID_SPEED  = 180;  // spin speed
 int BACK_SPEED   = 200;  // strong back-out
 
