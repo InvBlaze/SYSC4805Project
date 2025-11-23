@@ -187,12 +187,12 @@ void loop() {
     Serial.print(Mval); Serial.print("/");
     Serial.println(Rval);
 
-    // Case A: more than one sensor sees black -> instant TURN_AROUND (now ≈90°)
+    // Case A: more than one sensor sees black -> instant TURN_AROUND (~150°)
     if (blackCount >= 2) {
       plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT; // alternate
       lastTurnRight = !lastTurnRight;
 
-      Serial.println("  -> MULTI-SENSOR -> TURN_AROUND (instant)");
+      Serial.println("  -> MULTI-SENSOR -> TURN_AROUND (instant, ~150°)");
       stopMotors(); delay(25);
       stateStart = millis();
       state      = TURN_AROUND;
@@ -227,12 +227,12 @@ void loop() {
       stateStart = millis();
       state      = EDGE_BACKING;
     }
-    // Case D: ONLY middle sensor black -> instant TURN_AROUND (≈90°)
+    // Case D: ONLY middle sensor black -> instant TURN_AROUND (~150°)
     else if (M_black) {
       plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
       lastTurnRight = !lastTurnRight;
 
-      Serial.println("  -> MIDDLE ONLY -> TURN_AROUND (instant)");
+      Serial.println("  -> MIDDLE ONLY -> TURN_AROUND (instant, ~150°)");
       stopMotors(); delay(25);
       stateStart = millis();
       state      = TURN_AROUND;
@@ -246,13 +246,13 @@ void loop() {
       // Ignore sonar for a short time after spins/turns
       bool sonarArmed = (millis() >= sonarCooldownUntil);
 
-      // LEFT or RIGHT ultrasonic near -> obstacle turn (~90°)
+      // LEFT or RIGHT ultrasonic near -> obstacle turn (~150°)
       if (sonarArmed && (leftNear || rightNear)) {
         Serial.print("[TURN] sonar near: L=");
         Serial.print(us_left_cm);
         Serial.print(" cm, R=");
         Serial.print(us_right_cm);
-        Serial.println(" cm -> obstacle turn (~90°)");
+        Serial.println(" cm -> obstacle turn (~150°)");
 
         stopMotors(); delay(10);
         stateStart = millis();
@@ -281,12 +281,12 @@ void loop() {
       if (plannedTurn == TURN_LEFT) turnLeft(TURNAROUND_SPEED);
       else                          turnRight(TURNAROUND_SPEED);
 
-      // Use half of TURNAROUND_TIME_MS -> ~90° instead of 180°
-      if (millis() - stateStart >= (unsigned long)(TURNAROUND_TIME_MS / 2)) {
+      // Use 150/180 of TURNAROUND_TIME_MS -> ~150° turn
+      if (millis() - stateStart >= (unsigned long)(TURNAROUND_TIME_MS * 150L / 180L)) {
         stopMotors(); delay(15);
         state = RUN_FORWARD;
         sonarCooldownUntil = millis() + 300;
-        Serial.println("TURN_AROUND (~90°) done -> RUN");
+        Serial.println("TURN_AROUND (~150°) done -> RUN");
       }
       break;
     }
