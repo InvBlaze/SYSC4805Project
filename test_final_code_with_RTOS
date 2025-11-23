@@ -1,10 +1,12 @@
-#include <Arduino_FreeRTOS.h>
+#include <FreeRTOS_ARM.h>   // 教授提供的 DueFreeRTOS 头文件
 #include <task.h>
+#include <timers.h>
+#include <semphr.h>
 
 #define USE_LINE_SENSORS 1
 
-// 任务里的简化延时宏
-#define RTOS_DELAY(ms) vTaskDelay(pdMS_TO_TICKS(ms))
+// 任务里的简化延时宏（DueFreeRTOS 推荐用 portTICK_PERIOD_MS）
+#define RTOS_DELAY(ms) vTaskDelay((ms) / portTICK_PERIOD_MS)
 
 // --- Line sensors (front) ---
 #define L A0
@@ -28,7 +30,7 @@
 #define M4_DIR 9
 
 // Line thresholds (set these to your measured values)
-int TH_L = 795, TH_M = 795, TH_R = 795;
+int TH_L = 720, TH_M = 720, TH_R = 720;
 
 int BASE_SPEED   = 90;   // cruise
 int AVOID_SPEED  = 180;  // spin speed
@@ -77,7 +79,7 @@ unsigned long sonarCooldownUntil = 0;
 unsigned long spinTargetMs = 0;   // how long to spin in EDGE_SPINNING
 
 // -------------------- Ultrasonic cache (LEFT & RIGHT) --------------------
-// 这些会在 TaskSonar 中更新，在 TaskControl 中读取 → volatile
+// 在 TaskSonar 中更新，在 TaskControl 中读取
 volatile float us_left_cm  = 10000.0f;
 volatile float us_right_cm = 10000.0f;
 unsigned long lastPingLeft  = 0;
@@ -154,7 +156,7 @@ static void ultrasonicUpdate() {
 // -------------------- Setup --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== Snowplow (dual high sonar + debounced line edge logic, FreeRTOS) ===");
+  Serial.println("=== Snowplow (dual high sonar + debounced line edge logic, DueFreeRTOS) ===");
 
   pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
   pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
@@ -186,9 +188,9 @@ void setup() {
   xTaskCreate(
     TaskSonar,
     "Sonar",
-    256,
+    256,        // 栈大小（words，不是字节）
     NULL,
-    2,      // 优先级 2
+    2,          // 优先级 2
     NULL
   );
 
@@ -198,7 +200,7 @@ void setup() {
     "Control",
     512,
     NULL,
-    1,      // 优先级 1
+    1,          // 优先级 1
     NULL
   );
 
