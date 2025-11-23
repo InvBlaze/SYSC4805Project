@@ -39,17 +39,17 @@ const unsigned long US_TO_US     = 24000;  // pulseIn timeout (μs)
 const float US_ALPHA             = 0.45f;  // low-pass (0..1)
 
 // NEAR gating distance for ultrasonic
-const float HIGH_NEAR_CM = 20.0f;  // within this -> 180° turn
+const float HIGH_NEAR_CM = 15.0f;  // within this -> obstacle turn
 
 // Debounce: require N consecutive near hits (for sonar)
 const uint8_t NEAR_CONFIRM_N = 4;
 const uint8_t NEAR_DROP_N    = 2;
 
-// Turnaround (used for 180° and for degree→ms scaling)
+// Turnaround (used for degree→ms scaling)
 int   TURNAROUND_SPEED   = 180;
 int   TURNAROUND_TIME_MS = 2200;   // ~180° (tune ±100)
 const float MS_PER_DEG    = TURNAROUND_TIME_MS / 180.0f;
-const float SIDE_TURN_DEG = 110.0f;  // fixed 110° side turn for L-only / R-only
+const float SIDE_TURN_DEG = 50.0f;  // fixed ~50° side turn for L-only / R-only
 
 // -------------------- State machine --------------------
 enum State {
@@ -80,17 +80,12 @@ bool pingLeftNext = true;
 uint8_t leftNearCnt  = 0, rightNearCnt = 0;
 bool leftNear  = false, rightNear = false;
 
-// -------------------- IMU periodic printing --------------------
-unsigned long lastIMUPrint = 0;
-const unsigned long IMU_PRINT_PERIOD_MS = 200;  // print IMU info every 200 ms
-
 // -------------------- Forward decls --------------------
 void forward(int s);
 void backward(int s);
 void turnLeft(int s);
 void turnRight(int s);
 void stopMotors();
-void printIMU(); // user fills in actual IMU reads here
 
 // -------------------- Utilities --------------------
 static inline void pulseTrig(int pin) {
@@ -141,7 +136,7 @@ static void ultrasonicUpdate() {
 // -------------------- Setup --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== Snowplow (dual high sonar + line edge + IMU print) ===");
+  Serial.println("=== Snowplow (dual high sonar + line edge) ===");
 
   pinMode(M1_PWM, OUTPUT); pinMode(M1_DIR, OUTPUT);
   pinMode(M2_PWM, OUTPUT); pinMode(M2_DIR, OUTPUT);
@@ -168,12 +163,6 @@ void setup() {
 void loop() {
   ultrasonicUpdate();
 
-  // Periodic IMU info
-  if (millis() - lastIMUPrint >= IMU_PRINT_PERIOD_MS) {
-    lastIMUPrint = millis();
-    printIMU();
-  }
-
   int Lval=0, Mval=0, Rval=0;
   bool L_black=false, M_black=false, R_black=false;
 #if USE_LINE_SENSORS
@@ -181,7 +170,6 @@ void loop() {
   Mval = analogRead(M);
   Rval = analogRead(R);
 
-  // Single-read line detection
   L_black = (Lval > TH_L);
   M_black = (Mval > TH_M);
   R_black = (Rval > TH_R);
@@ -199,12 +187,12 @@ void loop() {
     Serial.print(Mval); Serial.print("/");
     Serial.println(Rval);
 
-    // Case A: more than one sensor sees black -> instant 180° TURNAROUND (no backing)
+    // Case A: more than one sensor sees black -> instant TURN_AROUND (now ≈90°)
     if (blackCount >= 2) {
       plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT; // alternate
       lastTurnRight = !lastTurnRight;
 
-      Serial.println("  -> MULTI-SENSOR -> 180° TURN_AROUND (instant)");
+      Serial.println("  -> MULTI-SENSOR -> TURN_AROUND (instant)");
       stopMotors(); delay(25);
       stateStart = millis();
       state      = TURN_AROUND;
@@ -239,12 +227,12 @@ void loop() {
       stateStart = millis();
       state      = EDGE_BACKING;
     }
-    // Case D: ONLY middle sensor black -> instant 180° TURN_AROUND (no backing)
+    // Case D: ONLY middle sensor black -> instant TURN_AROUND (≈90°)
     else if (M_black) {
       plannedTurn   = lastTurnRight ? TURN_LEFT : TURN_RIGHT;
       lastTurnRight = !lastTurnRight;
 
-      Serial.println("  -> MIDDLE ONLY -> 180° TURN_AROUND (instant)");
+      Serial.println("  -> MIDDLE ONLY -> TURN_AROUND (instant)");
       stopMotors(); delay(25);
       stateStart = millis();
       state      = TURN_AROUND;
@@ -258,13 +246,13 @@ void loop() {
       // Ignore sonar for a short time after spins/turns
       bool sonarArmed = (millis() >= sonarCooldownUntil);
 
-      // LEFT or RIGHT ultrasonic near -> 180° turn-around
+      // LEFT or RIGHT ultrasonic near -> obstacle turn (~90°)
       if (sonarArmed && (leftNear || rightNear)) {
         Serial.print("[TURN] sonar near: L=");
         Serial.print(us_left_cm);
         Serial.print(" cm, R=");
         Serial.print(us_right_cm);
-        Serial.println(" cm -> 180°");
+        Serial.println(" cm -> obstacle turn (~90°)");
 
         stopMotors(); delay(10);
         stateStart = millis();
@@ -293,11 +281,12 @@ void loop() {
       if (plannedTurn == TURN_LEFT) turnLeft(TURNAROUND_SPEED);
       else                          turnRight(TURNAROUND_SPEED);
 
-      if (millis() - stateStart >= (unsigned long)TURNAROUND_TIME_MS) {
+      // Use half of TURNAROUND_TIME_MS -> ~90° instead of 180°
+      if (millis() - stateStart >= (unsigned long)(TURNAROUND_TIME_MS / 2)) {
         stopMotors(); delay(15);
         state = RUN_FORWARD;
         sonarCooldownUntil = millis() + 300;
-        Serial.println("TURN_AROUND done -> RUN");
+        Serial.println("TURN_AROUND (~90°) done -> RUN");
       }
       break;
     }
@@ -342,20 +331,6 @@ void loop() {
   }
 
   delay(5);
-}
-
-// -------------------- IMU print function (placeholder) --------------------
-void printIMU() {
-  // Replace this with your real IMU read + print code.
-  // Example:
-  // float yaw = getYaw(); float pitch = getPitch(); float roll = getRoll();
-  // Serial.print("[IMU] yaw="); Serial.print(yaw);
-  // Serial.print(" pitch="); Serial.print(pitch);
-  // Serial.print(" roll="); Serial.println(roll);
-
-  Serial.print("[IMU] t=");
-  Serial.print(millis());
-  Serial.println(" ms (placeholder)");
 }
 
 // -------------------- Motor helpers --------------------
