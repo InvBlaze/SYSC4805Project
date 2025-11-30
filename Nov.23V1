@@ -1,17 +1,17 @@
 #define USE_LINE_SENSORS 1
 
-// --- Line sensors (front) ---
+// --- Line sensors for dodging the test field edge ---
 #define L A0
 #define M A1
 #define R A2
 
-// --- Ultrasonic sensors (front, LEFT & RIGHT high) ---
+// --- Ultrasonic sensors LEFT & RIGHT for dodging obstacles ---
 #define US_LEFT_TRIG   24
 #define US_LEFT_ECHO   25
 #define US_RIGHT_TRIG  29
 #define US_RIGHT_ECHO  27
 
-// --- Motor pins (unchanged) ---
+// --- Motor pins ---
 #define M1_PWM 2
 #define M1_DIR 3
 #define M2_PWM 4
@@ -21,14 +21,14 @@
 #define M4_PWM 8
 #define M4_DIR 9
 
-// Line thresholds (set these to your measured values)
-int TH_L = 820, TH_M = 820, TH_R = 820;
+// Line thresholds(This may vary based on the actual measured field values)
+int TH_L = 750, TH_M = 750, TH_R = 750;
 
-// ==== SPEEDS (1.5x previous, with PWM clamped to 255) ====
-int BASE_SPEED       = 135;  // was 90  -> 90 * 1.5
-int AVOID_SPEED      = 255;  // was 180 -> 270, but max PWM is 255
-int BACK_SPEED       = 255;  // was 200 -> 300, clamp to 255
-int TURNAROUND_SPEED = 255;  // was 180 -> 270, clamp to 255
+// ==== Default SPEEDS ====
+int BASE_SPEED       = 135;  
+int AVOID_SPEED      = 255;  
+int BACK_SPEED       = 255;
+int TURNAROUND_SPEED = 255;
 
 // Edge handling timings (ms)
 // "Distance" ≈ time at constant BACK_SPEED
