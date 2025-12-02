@@ -51,7 +51,7 @@ const uint8_t NEAR_DROP_N    = 2;
 
 // Turnaround
 int   TURNAROUND_TIME_MS = 1550;
-const float MS_PER_DEG
+const float MS_PER_DEG = TURNAROUND_TIME_MS / 180.0f;
 const float SIDE_TURN_DEG = 50.0f;  // side spin angle for L-only / R-only
 
 // -------------------- State machine --------------------
